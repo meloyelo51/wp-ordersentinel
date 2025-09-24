@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OrderSentinel — Fraud/OSINT helper for WooCommerce orders
  * Description: Bulk/one-click OSINT on WooCommerce orders (RDAP, geoloc, AbuseIPDB). Includes dashboard, CSV export, optional non-PII AbuseIPDB reporting, and GitHub updates.
- * Version: 0.2.2
+ * Version: 0.2.3
  * Author: Matt's Basement Arcade
  * Text Domain: order-sentinel
  */
@@ -38,6 +38,13 @@ class OS_Order_Sentinel {
 		add_action( 'admin_post_ordersentinel_export', array( $this, 'handle_export_csv' ) );
 		add_action( 'admin_post_ordersentinel_report_ip', array( $this, 'handle_report_ip' ) );
 		add_action( 'admin_post_ordersentinel_bulk_report', array( $this, 'handle_bulk_report' ) );
+
+		// NEW: reset report flags (per-row + bulk)
+		add_action( 'admin_post_ordersentinel_reset_report', array( $this, 'handle_reset_report' ) );
+		add_action( 'admin_post_ordersentinel_bulk_reset', array( $this, 'handle_bulk_reset' ) );
+
+		// NEW: rescan recent orders
+		add_action( 'admin_post_ordersentinel_rescan_recent', array( $this, 'handle_rescan_recent' ) );
 
 		// Upgrade-safe DB ensure + backfill
 		add_action( 'admin_init', array( $this, 'maybe_migrate' ) );
@@ -216,12 +223,28 @@ class OS_Order_Sentinel {
 		return (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE order_id = %d", $order_id ) ) > 0; // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 	}
 
-	/** Payment/risk meta sniff */
+	/** Payment/risk meta sniff (with explicit keys support) */
 	protected function sniff_payment_meta( $order_id ) {
+		$opts = $this->get_options();
+		$keys_cfg = trim( (string) ( $opts['risk_meta_keys'] ?? '' ) );
+
+		$out = array();
+		if ( $keys_cfg !== '' ) {
+			$keys = $this->parse_list( $keys_cfg );
+			foreach ( $keys as $k ) {
+				$val = get_post_meta( $order_id, $k, true );
+				if ( '' === $val || null === $val ) { continue; }
+				if ( is_array( $val ) || is_object( $val ) ) { $val = wp_json_encode( $val ); }
+				$out[ $k ] = substr( (string) $val, 0, 256 );
+				if ( count( $out ) >= 20 ) { break; }
+			}
+			return $out;
+		}
+
+		// Fallback heuristic
 		$keys = get_post_meta( $order_id );
-		$out  = array(); $max = 20;
 		foreach ( $keys as $k => $arr ) {
-			if ( count( $out ) >= $max ) { break; }
+			if ( count( $out ) >= 20 ) { break; }
 			$lk = strtolower( $k );
 			if ( false !== strpos( $lk, 'risk' ) || false !== strpos( $lk, 'stripe' ) || false !== strpos( $lk, 'wcpay' ) ) {
 				$val = maybe_unserialize( $arr[0] ?? '' );
@@ -253,6 +276,16 @@ class OS_Order_Sentinel {
 	}
 	protected function email_domain( $email ) { $email = (string) $email; if ( ! $email || false === strpos( $email, '@' ) ) { return ''; } return strtolower( substr( $email, strrpos( $email, '@' ) + 1 ) ); }
 	protected function digits_only( $s ) { return preg_replace( '/\D+/', '', (string) $s ); }
+	protected function parse_list( $s ) {
+		$s = str_replace( array("\r\n", "\r"), "\n", (string) $s );
+		$parts = preg_split( '/[\n,;|]+/', $s );
+		$out = array();
+		foreach ( $parts as $p ) {
+			$p = trim( $p );
+			if ( $p !== '' ) { $out[] = $p; }
+		}
+		return array_unique( $out );
+	}
 
 	/** Lookups */
 	protected function lookup_rdap( $ip ) {
@@ -365,6 +398,8 @@ class OS_Order_Sentinel {
 			'github_repo'          => 'meloyelo51/wp-ordersentinel',
 			'github_token'         => '',
 			'update_channel'       => 'stable', // stable | beta
+			// Risk keys mapping
+			'risk_meta_keys'       => '',
 		);
 		$opts = get_option( self::OPTION_KEY, array() );
 		$opts = wp_parse_args( $opts, $defaults );
@@ -388,6 +423,10 @@ class OS_Order_Sentinel {
 		add_settings_field( 'ordersentinel_repo', __( 'GitHub repo (owner/name)', 'order-sentinel' ), array( $this, 'field_repo' ), 'ordersentinel', 'ordersentinel_upd' );
 		add_settings_field( 'ordersentinel_channel', __( 'Update channel', 'order-sentinel' ), array( $this, 'field_channel' ), 'ordersentinel', 'ordersentinel_upd' );
 		add_settings_field( 'ordersentinel_token', __( 'GitHub token (optional)', 'order-sentinel' ), array( $this, 'field_token' ), 'ordersentinel', 'ordersentinel_upd' );
+
+		// Risk mapping fields
+		add_settings_section( 'ordersentinel_risk', __( 'Risk Fields', 'order-sentinel' ), '__return_false', 'ordersentinel' );
+		add_settings_field( 'ordersentinel_risk_keys', __( 'Risk meta keys (newline/comma separated)', 'order-sentinel' ), array( $this, 'field_risk_keys' ), 'ordersentinel', 'ordersentinel_risk' );
 	}
 	public function field_enable() { $o = $this->get_options(); $chk = function($k)use($o){checked(1,$o['enable'][$k]);};
 		echo '<label><input type="checkbox" name="' . esc_attr( self::OPTION_KEY ) . '[enable][rdap]" value="1" '; $chk('rdap'); echo '> RDAP</label><br />';
@@ -396,7 +435,7 @@ class OS_Order_Sentinel {
 	}
 	public function field_abuseipdb()  { $o=$this->get_options(); printf('<input type="text" class="regular-text" name="%s[abuseipdb_key]" value="%s" autocomplete="off" />', esc_attr(self::OPTION_KEY), esc_attr($o['abuseipdb_key'])); echo '<p class="description">Stored as a WordPress option.</p>'; }
 	public function field_abuse_cats() { $o=$this->get_options(); printf('<input type="text" class="regular-text" name="%s[abuseipdb_categories]" value="%s" />', esc_attr(self::OPTION_KEY), esc_attr($o['abuseipdb_categories'])); echo ' <a href="https://www.abuseipdb.com/categories" target="_blank" rel="noreferrer">Category IDs</a>'; }
-	public function field_abuse_comment(){ $o=$this->get_options(); printf('<input type="text" class="regular-text" name="%s[abuseipdb_comment_tmpl]" value="%s" />', esc_attr(self::OPTION_KEY), esc_attr($o['abuseipdb_comment_tmpl'])); echo '<p class="description">Placeholders: {order_id}, {ip}, {ts}, {signals}. Avoid PII.</p>'; }
+	public function field_abuse_comment(){ $o=$this->get_options(); printf('<textarea rows="4" style="width:600px;max-width:100%%" name="%s[abuseipdb_comment_tmpl]">%s</textarea>', esc_attr(self::OPTION_KEY), esc_textarea($o['abuseipdb_comment_tmpl'])); echo '<p class="description">Placeholders: {order_id}, {ip}, {ts}, {signals}. Avoid PII.</p>'; }
 	public function field_window()     { $o=$this->get_options(); printf('<input type="number" min="1" max="365" name="%s[window_days]" value="%d" />', esc_attr(self::OPTION_KEY), intval($o['window_days'])); }
 	public function field_meta_toggle(){ $o=$this->get_options(); printf('<label><input type="checkbox" name="%s[save_to_meta]" value="1" %s /> %s</label>', esc_attr(self::OPTION_KEY), checked(1,!empty($o['save_to_meta']),false), 'Store JSON on the order (optional)'); }
 	public function field_uninstall()  { $o=$this->get_options(); printf('<label><input type="checkbox" name="%s[drop_on_uninstall]" value="1" %s /> %s</label>', esc_attr(self::OPTION_KEY), checked(1,!empty($o['drop_on_uninstall']),false), 'Drop plugin table when plugin is deleted'); }
@@ -409,6 +448,7 @@ class OS_Order_Sentinel {
 		<?php
 	}
 	public function field_token()      { $o=$this->get_options(); printf('<input type="password" class="regular-text" name="%s[github_token]" value="%s" autocomplete="off" />', esc_attr(self::OPTION_KEY), esc_attr($o['github_token'])); echo '<p class="description">Optional: GitHub token for higher rate limits or private repos.</p>'; }
+	public function field_risk_keys()  { $o=$this->get_options(); printf('<textarea rows="4" style="width:600px;max-width:100%%" name="%s[risk_meta_keys]" placeholder="_stripe_risk_score\n_wcpay_charge_risk_level">%s</textarea>', esc_attr(self::OPTION_KEY), esc_textarea($o['risk_meta_keys'])); echo '<p class="description">One per line (or comma/semicolon). Leave empty to auto-detect keys containing <code>risk</code>, <code>stripe</code>, or <code>wcpay</code>.</p>'; }
 
 	/** Dashboard */
 	public function render_admin_page() {
@@ -426,6 +466,15 @@ class OS_Order_Sentinel {
 		$after_str = wp_date( 'Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ) );
 		$rows      = $this->get_recent_rows( $after_str, 200 );
 
+		// Rescan form
+		echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_rescan_recent' ) ) . '" style="margin:10px 0;">';
+		wp_nonce_field( 'ordersentinel_rescan_recent' );
+		echo '<label>Rescan last <input type="number" min="1" max="500" name="n" value="50" /> orders</label> ';
+		submit_button( 'Rescan', 'secondary', 'ordersentinel_rescan_btn', false );
+		echo ' <span class="description">Re-runs research and stores fresh rows. Keep numbers modest.</span>';
+		echo '</form>';
+
+		// Small aggregations
 		$by_asn = array(); $by_isp = array(); $by_emaildom = array(); $by_phone = array(); $addr2_flags = array();
 		foreach ( $rows as $row ) {
 			$r = json_decode( $row->data, true ); if ( ! is_array( $r ) ) { continue; }
@@ -447,27 +496,49 @@ class OS_Order_Sentinel {
 		$export_url = wp_nonce_url( admin_url( 'admin-post.php?action=ordersentinel_export' ), 'ordersentinel_export' );
 		echo '<p><a class="button" href="' . esc_url( $export_url ) . '">Export CSV (recent research)</a></p>';
 
-		// Bulk report form
+		// Bulk report/reset form
 		echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_bulk_report' ) ) . '">';
 		wp_nonce_field( 'ordersentinel_bulk_report' );
 		echo '<h2>Recent research</h2>';
-		echo '<table class="widefat striped"><thead><tr><th style="width:28px;"><input type="checkbox" onclick="jQuery(\'.ordersentinel-select\').prop(\'checked\', this.checked);" /></th><th>When</th><th>Order</th><th>IP</th><th>Geo/ISP</th><th>ASN</th><th>Email</th><th>Phone</th><th>Addr2</th><th>AbuseIPDB</th><th>Risk</th><th>Report</th></tr></thead><tbody>';
+		echo '<table class="widefat striped"><thead><tr><th style="width:28px;"><input type="checkbox" onclick="jQuery(\'.ordersentinel-select\').prop(\'checked\', this.checked);" /></th><th>When</th><th>Order</th><th>IP</th><th>Geo/ISP</th><th>ASN</th><th>Email</th><th>Phone</th><th>Addr2</th><th>AbuseIPDB</th><th>Risk</th><th>Actions</th></tr></thead><tbody>';
 		foreach ( $rows as $row ) {
 			$r = json_decode( $row->data, true );
 			$geo = $r['lookups']['geo'] ?? array();
 			$ab  = $r['lookups']['abuseipdb']['data'] ?? array();
 			$addr2_flag = ! empty( $r['heuristics']['addr2_random']['random_like'] );
-			$risk = '';
+
+			// Render risk summary (use explicit keys if set, else sniffed set)
+			$risk_parts = array();
 			if ( ! empty( $r['payment_meta'] ) ) {
-				foreach ( $r['payment_meta'] as $k => $v ) { if ( stripos( $k, 'risk' ) !== false ) { $risk = $k . ': ' . $v; break; } }
+				$opts = $this->get_options();
+				$keys_cfg = trim( (string) ( $opts['risk_meta_keys'] ?? '' ) );
+				if ( $keys_cfg !== '' ) {
+					foreach ( $this->parse_list( $keys_cfg ) as $k ) {
+						if ( isset( $r['payment_meta'][ $k ] ) ) {
+							$risk_parts[] = $k . ': ' . $r['payment_meta'][ $k ];
+						}
+					}
+				} else {
+					foreach ( $r['payment_meta'] as $k => $v ) {
+						if ( stripos( $k, 'risk' ) !== false ) { $risk_parts[] = $k . ': ' . $v; }
+						if ( count( $risk_parts ) >= 2 ) { break; }
+					}
+				}
 			}
+			$risk = implode( ' | ', array_slice( $risk_parts, 0, 3 ) );
+
 			$can_report = ( ! $row->abuseipdb_reported && ! empty( $row->ip ) );
-			$report_cell = $row->abuseipdb_reported ? '<span style="color:#2d7;">Reported</span>' :
-				( $can_report ? '<a class="button" href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=ordersentinel_report_ip&order_id=' . intval( $row->order_id ) ), 'ordersentinel_report_ip' ) ) . '">Report</a>' : '' );
+			$actions = array();
+			if ( $can_report ) {
+				$actions[] = '<a class="button" href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=ordersentinel_report_ip&order_id=' . intval( $row->order_id ) ), 'ordersentinel_report_ip' ) ) . '">Report</a>';
+			} else {
+				$actions[] = '<span style="color:#2d7;">Reported</span>';
+				$actions[] = '<a class="button" href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=ordersentinel_reset_report&order_id=' . intval( $row->order_id ) ), 'ordersentinel_reset_report' ) ) . '">Reset</a>';
+			}
 
 			printf(
 				'<tr><td>%s</td><td>%s</td><td><a href="%s">#%d</a></td><td>%s</td><td>%s, %s — %s</td><td>%s</td><td>%s</td><td>%s</td><td>%s%% / %s</td><td>%s</td><td>%s</td></tr>',
-				$can_report ? '<input type="checkbox" class="ordersentinel-select" name="selected[]" value="' . intval( $row->order_id ) . '" />' : '',
+				( ! $row->abuseipdb_reported && $row->ip ) ? '<input type="checkbox" class="ordersentinel-select" name="selected[]" value="' . intval( $row->order_id ) . '" />' : '',
 				esc_html( $row->created_at ),
 				esc_url( get_edit_post_link( intval( $row->order_id ) ) ),
 				intval( $row->order_id ),
@@ -480,18 +551,23 @@ class OS_Order_Sentinel {
 				isset( $ab['abuseConfidenceScore'] ) ? intval( $ab['abuseConfidenceScore'] ) : '',
 				isset( $ab['totalReports'] ) ? intval( $ab['totalReports'] ) : '',
 				$risk ? esc_html( $risk ) : '',
-				$report_cell
+				implode( ' ', $actions )
 			);
 		}
 		if ( empty( $rows ) ) { echo '<tr><td colspan="12">No research stored yet. Run research via Bulk action or re-run on an order.</td></tr>'; }
 		echo '</tbody></table>';
+
+		// Two submit buttons: report vs reset (reset uses formaction)
 		submit_button( 'Report selected to AbuseIPDB', 'secondary', 'ordersentinel_bulk_report_btn', false );
+		echo ' ';
+		echo '<button type="submit" class="button" formaction="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_bulk_reset' ) ) . '">' . esc_html__( 'Reset report state for selected', 'order-sentinel' ) . '</button>';
+
 		echo '</form>';
 
 		echo '</div>';
 	}
 
-	/** DB access (single definition) */
+	/** DB access */
 	protected function get_latest_row_for_order( $order_id ) {
 		global $wpdb; $table = self::table_name();
 		return $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE order_id = %d ORDER BY id DESC LIMIT 1", $order_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
@@ -567,6 +643,55 @@ class OS_Order_Sentinel {
 		}
 		$msg = "Bulk report finished. OK: $ok" . ( $fail ? ", Failed: $fail" : '' );
 		wp_safe_redirect( add_query_arg( 'ordersentinel_msg', rawurlencode( $msg ), admin_url( 'admin.php?page=ordersentinel' ) ) ); exit;
+	}
+
+	/** Reset report (per-row) */
+	public function handle_reset_report() {
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_GET['_wpnonce'] ?? '', 'ordersentinel_reset_report' ) ) { wp_die( 'Not allowed' ); }
+		$order_id = absint( $_GET['order_id'] ?? 0 ); if ( ! $order_id ) { wp_die( 'No order' ); }
+		$this->reset_report_for_order( $order_id );
+		wp_safe_redirect( add_query_arg( 'ordersentinel_msg', rawurlencode( 'Report state reset for order #' . $order_id ), admin_url( 'admin.php?page=ordersentinel' ) ) ); exit;
+	}
+	protected function reset_report_for_order( $order_id ) {
+		global $wpdb;
+		$row = $this->get_latest_row_for_order( $order_id ); if ( ! $row ) { return; }
+		$wpdb->update(
+			self::table_name(),
+			array( 'abuseipdb_reported' => 0, 'abuseipdb_report_id' => null, 'abuseipdb_last_response' => null, 'updated_at' => current_time( 'mysql' ) ),
+			array( 'id' => $row->id ),
+			array( '%d','%s','%s','%s' ),
+			array( '%d' )
+		);
+	}
+
+	/** Bulk reset */
+	public function handle_bulk_reset() {
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'ordersentinel_bulk_report' ) ) { wp_die( 'Not allowed' ); }
+		$selected = array_map( 'absint', (array) ( $_POST['selected'] ?? array() ) );
+		$selected = array_filter( array_unique( $selected ) );
+		foreach ( $selected as $order_id ) { $this->reset_report_for_order( $order_id ); }
+		wp_safe_redirect( add_query_arg( 'ordersentinel_msg', rawurlencode( 'Reset done for selected orders.' ), admin_url( 'admin.php?page=ordersentinel' ) ) ); exit;
+	}
+
+	/** Rescan last N orders */
+	public function handle_rescan_recent() {
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'ordersentinel_rescan_recent' ) ) { wp_die( 'Not allowed' ); }
+		$n = isset( $_POST['n'] ) ? max( 1, min( 500, absint( $_POST['n'] ) ) ) : 50;
+		if ( ! class_exists( 'WooCommerce' ) || ! function_exists( 'wc_get_orders' ) ) { wp_die( 'WooCommerce not available' ); }
+		$args = array(
+			'limit'   => $n,
+			'orderby' => 'date',
+			'order'   => 'DESC',
+			'return'  => 'ids',
+		);
+		$ids = wc_get_orders( $args );
+		@set_time_limit( 0 );
+		$count = 0;
+		foreach ( $ids as $oid ) {
+			$this->run_research_for_order( absint( $oid ) );
+			$count++;
+		}
+		wp_safe_redirect( add_query_arg( 'ordersentinel_msg', rawurlencode( "Rescanned $count orders." ), admin_url( 'admin.php?page=ordersentinel' ) ) ); exit;
 	}
 
 	/** Report helper */
@@ -710,11 +835,7 @@ class OS_Order_Sentinel {
 				}
 			}
 		}
-		// Fallback to source zipball (WARNING: folder name may not match plugin slug).
-		if ( '' === $package && ! empty( $candidate['zipball_url'] ) ) {
-			$package = (string) $candidate['zipball_url'];
-		}
-
+		if ( '' === $package && ! empty( $candidate['zipball_url'] ) ) { $package = (string) $candidate['zipball_url']; }
 		return array(
 			'version'   => $version ?: null,
 			'url'       => $url ?: 'https://github.com/' . $repo,
