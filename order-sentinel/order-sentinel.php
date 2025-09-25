@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OrderSentinel — Fraud/OSINT helper for WooCommerce orders
  * Description: Bulk/one-click OSINT on WooCommerce orders (RDAP, geoloc, AbuseIPDB). Includes dashboard, CSV export, optional non-PII AbuseIPDB reporting, and GitHub updates.
- * Version: 0.2.3
+ * Version: 0.3.0
  * Author: Matt's Basement Arcade
  * Text Domain: order-sentinel
  */
@@ -15,6 +15,9 @@ class OS_Order_Sentinel {
 	const TABLE_SLUG  = 'ordersentinel';
 	const DBV_OPTION  = 'ordersentinel_db_version';
 	const DB_VERSION  = '1';
+
+	/** Debug info for updater diagnostics */
+	protected $last_updater_debug = array();
 
 	public function __construct() {
 		add_action( 'init', array( $this, 'bootstrap' ) );
@@ -39,12 +42,15 @@ class OS_Order_Sentinel {
 		add_action( 'admin_post_ordersentinel_report_ip', array( $this, 'handle_report_ip' ) );
 		add_action( 'admin_post_ordersentinel_bulk_report', array( $this, 'handle_bulk_report' ) );
 
-		// NEW: reset report flags (per-row + bulk)
+		// Reset report flags (per-row + bulk)
 		add_action( 'admin_post_ordersentinel_reset_report', array( $this, 'handle_reset_report' ) );
 		add_action( 'admin_post_ordersentinel_bulk_reset', array( $this, 'handle_bulk_reset' ) );
 
-		// NEW: rescan recent orders
+		// Rescan recent orders
 		add_action( 'admin_post_ordersentinel_rescan_recent', array( $this, 'handle_rescan_recent' ) );
+
+		// Force update check (GitHub updater)
+		add_action( 'admin_post_ordersentinel_force_update_check', array( $this, 'handle_force_update_check' ) );
 
 		// Upgrade-safe DB ensure + backfill
 		add_action( 'admin_init', array( $this, 'maybe_migrate' ) );
@@ -94,11 +100,9 @@ class OS_Order_Sentinel {
 		return $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table; // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 	}
 	public function maybe_migrate() {
-		// Ensure table exists (covers upgrades while active).
 		if ( ! $this->table_exists() || get_option( self::DBV_OPTION ) !== self::DB_VERSION ) {
 			self::create_or_upgrade_table();
 		}
-		// One-time backfill from _ordersentinel_research meta (last 90 days)
 		if ( ! get_option( 'ordersentinel_backfilled' ) && class_exists( 'WooCommerce' ) && function_exists( 'wc_get_orders' ) ) {
 			$after_str = wp_date( 'Y-m-d H:i:s', time() - ( 90 * DAY_IN_SECONDS ) );
 			$args = array(
@@ -241,7 +245,6 @@ class OS_Order_Sentinel {
 			return $out;
 		}
 
-		// Fallback heuristic
 		$keys = get_post_meta( $order_id );
 		foreach ( $keys as $k => $arr ) {
 			if ( count( $out ) >= 20 ) { break; }
@@ -439,7 +442,7 @@ class OS_Order_Sentinel {
 	public function field_window()     { $o=$this->get_options(); printf('<input type="number" min="1" max="365" name="%s[window_days]" value="%d" />', esc_attr(self::OPTION_KEY), intval($o['window_days'])); }
 	public function field_meta_toggle(){ $o=$this->get_options(); printf('<label><input type="checkbox" name="%s[save_to_meta]" value="1" %s /> %s</label>', esc_attr(self::OPTION_KEY), checked(1,!empty($o['save_to_meta']),false), 'Store JSON on the order (optional)'); }
 	public function field_uninstall()  { $o=$this->get_options(); printf('<label><input type="checkbox" name="%s[drop_on_uninstall]" value="1" %s /> %s</label>', esc_attr(self::OPTION_KEY), checked(1,!empty($o['drop_on_uninstall']),false), 'Drop plugin table when plugin is deleted'); }
-	public function field_repo()       { $o=$this->get_options(); printf('<input type="text" class="regular-text" name="%s[github_repo]" value="%s" />', esc_attr(self::OPTION_KEY), esc_attr($o['github_repo'])); echo '<p class="description">Example: <code>meloyelo51/wp-ordersentinel</code>. Repo must be public or token-accessible.</p>'; }
+	public function field_repo()       { $o=$this->get_options(); printf('<input type="text" class="regular-text" name="%s[github_repo]" value="%s" />', esc_attr(self::OPTION_KEY), esc_attr(trim($o['github_repo']))); echo '<p class="description">Example: <code>meloyelo51/wp-ordersentinel</code>. Repo must be public or token-accessible.</p>'; }
 	public function field_channel()    { $o=$this->get_options(); $v = $o['update_channel']; ?>
 		<select name="<?php echo esc_attr(self::OPTION_KEY); ?>[update_channel]">
 			<option value="stable" <?php selected('stable',$v); ?>>Stable (latest non-prerelease)</option>
@@ -450,7 +453,7 @@ class OS_Order_Sentinel {
 	public function field_token()      { $o=$this->get_options(); printf('<input type="password" class="regular-text" name="%s[github_token]" value="%s" autocomplete="off" />', esc_attr(self::OPTION_KEY), esc_attr($o['github_token'])); echo '<p class="description">Optional: GitHub token for higher rate limits or private repos.</p>'; }
 	public function field_risk_keys()  { $o=$this->get_options(); printf('<textarea rows="4" style="width:600px;max-width:100%%" name="%s[risk_meta_keys]" placeholder="_stripe_risk_score\n_wcpay_charge_risk_level">%s</textarea>', esc_attr(self::OPTION_KEY), esc_textarea($o['risk_meta_keys'])); echo '<p class="description">One per line (or comma/semicolon). Leave empty to auto-detect keys containing <code>risk</code>, <code>stripe</code>, or <code>wcpay</code>.</p>'; }
 
-	/** Dashboard */
+	/** Admin page */
 	public function render_admin_page() {
 		if ( ! current_user_can( 'manage_woocommerce' ) ) { return; }
 		$opts = $this->get_options();
@@ -460,13 +463,52 @@ class OS_Order_Sentinel {
 		printf( '<a href="%s" class="nav-tab %s">Settings</a>', esc_url( admin_url( 'admin.php?page=ordersentinel&tab=settings' ) ), ( 'settings' === $tab ? 'nav-tab-active' : '' ) );
 		echo '</h2>';
 
-		if ( 'settings' === $tab ) { echo '<form method="post" action="options.php">'; settings_fields( 'ordersentinel' ); do_settings_sections( 'ordersentinel' ); submit_button(); echo '</form></div>'; return; }
+		if ( 'settings' === $tab ) {
+			echo '<form method="post" action="options.php">';
+			settings_fields( 'ordersentinel' );
+			do_settings_sections( 'ordersentinel' );
+			submit_button();
+			echo '</form>';
 
+			// Updater diagnostics + force button
+			echo '<hr /><h2>Updater tools</h2>';
+			$rel = $this->fetch_github_release( trim($opts['github_repo']), $opts['update_channel'], $opts['github_token'] );
+			$pkg_ok = ( is_array( $rel ) && ! empty( $rel['package'] ) ) ? 'OK' : 'MISSING';
+			$dbg = $this->last_updater_debug;
+			echo '<p><strong>Diagnostics</strong></p>';
+			echo '<ul style="margin-left:1em;">';
+			printf( '<li>Current version: <code>%s</code></li>', esc_html( $this->plugin_version() ) );
+			printf( '<li>Channel: <code>%s</code> &middot; Repo: <code>%s</code></li>', esc_html( $opts['update_channel'] ), esc_html( trim($opts['github_repo']) ) );
+			if ( $rel ) {
+				printf( '<li>Remote version: <code>%s</code> &middot; Asset: <code>%s</code></li>', esc_html( $rel['version'] ), esc_html( $pkg_ok ) );
+			} else {
+				echo '<li>Remote release: <em>not found for this channel</em></li>';
+			}
+			if ( ! empty( $dbg ) ) {
+				printf( '<li>HTTP: <code>%s</code> via <code>%s</code>%s</li>',
+					isset($dbg['http']) ? esc_html($dbg['http']) : 'n/a',
+					isset($dbg['endpoint']) ? esc_html($dbg['endpoint']) : 'n/a',
+					!empty($dbg['err']) ? ' — <code>'.esc_html($dbg['err']).'</code>' : ''
+				);
+			}
+			echo '</ul>';
+
+			// Force update form
+			echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_force_update_check' ) ) . '">';
+			wp_nonce_field( 'ordersentinel_force_update_check' );
+			submit_button( 'Check for updates now', 'secondary', 'ordersentinel_force_update_check_btn', false );
+			echo ' <span class="description">Clears update cache and triggers immediate check.</span>';
+			echo '</form>';
+
+			echo '</div>';
+			return;
+		}
+
+		// Dashboard
 		$days      = max( 1, intval( $opts['window_days'] ) );
 		$after_str = wp_date( 'Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ) );
 		$rows      = $this->get_recent_rows( $after_str, 200 );
 
-		// Rescan form
 		echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_rescan_recent' ) ) . '" style="margin:10px 0;">';
 		wp_nonce_field( 'ordersentinel_rescan_recent' );
 		echo '<label>Rescan last <input type="number" min="1" max="500" name="n" value="50" /> orders</label> ';
@@ -474,7 +516,6 @@ class OS_Order_Sentinel {
 		echo ' <span class="description">Re-runs research and stores fresh rows. Keep numbers modest.</span>';
 		echo '</form>';
 
-		// Small aggregations
 		$by_asn = array(); $by_isp = array(); $by_emaildom = array(); $by_phone = array(); $addr2_flags = array();
 		foreach ( $rows as $row ) {
 			$r = json_decode( $row->data, true ); if ( ! is_array( $r ) ) { continue; }
@@ -496,7 +537,6 @@ class OS_Order_Sentinel {
 		$export_url = wp_nonce_url( admin_url( 'admin-post.php?action=ordersentinel_export' ), 'ordersentinel_export' );
 		echo '<p><a class="button" href="' . esc_url( $export_url ) . '">Export CSV (recent research)</a></p>';
 
-		// Bulk report/reset form
 		echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_bulk_report' ) ) . '">';
 		wp_nonce_field( 'ordersentinel_bulk_report' );
 		echo '<h2>Recent research</h2>';
@@ -507,16 +547,13 @@ class OS_Order_Sentinel {
 			$ab  = $r['lookups']['abuseipdb']['data'] ?? array();
 			$addr2_flag = ! empty( $r['heuristics']['addr2_random']['random_like'] );
 
-			// Render risk summary (use explicit keys if set, else sniffed set)
 			$risk_parts = array();
 			if ( ! empty( $r['payment_meta'] ) ) {
 				$opts = $this->get_options();
 				$keys_cfg = trim( (string) ( $opts['risk_meta_keys'] ?? '' ) );
 				if ( $keys_cfg !== '' ) {
 					foreach ( $this->parse_list( $keys_cfg ) as $k ) {
-						if ( isset( $r['payment_meta'][ $k ] ) ) {
-							$risk_parts[] = $k . ': ' . $r['payment_meta'][ $k ];
-						}
+						if ( isset( $r['payment_meta'][ $k ] ) ) { $risk_parts[] = $k . ': ' . $r['payment_meta'][ $k ]; }
 					}
 				} else {
 					foreach ( $r['payment_meta'] as $k => $v ) {
@@ -557,13 +594,11 @@ class OS_Order_Sentinel {
 		if ( empty( $rows ) ) { echo '<tr><td colspan="12">No research stored yet. Run research via Bulk action or re-run on an order.</td></tr>'; }
 		echo '</tbody></table>';
 
-		// Two submit buttons: report vs reset (reset uses formaction)
 		submit_button( 'Report selected to AbuseIPDB', 'secondary', 'ordersentinel_bulk_report_btn', false );
 		echo ' ';
 		echo '<button type="submit" class="button" formaction="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_bulk_reset' ) ) . '">' . esc_html__( 'Reset report state for selected', 'order-sentinel' ) . '</button>';
 
 		echo '</form>';
-
 		echo '</div>';
 	}
 
@@ -678,12 +713,7 @@ class OS_Order_Sentinel {
 		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'ordersentinel_rescan_recent' ) ) { wp_die( 'Not allowed' ); }
 		$n = isset( $_POST['n'] ) ? max( 1, min( 500, absint( $_POST['n'] ) ) ) : 50;
 		if ( ! class_exists( 'WooCommerce' ) || ! function_exists( 'wc_get_orders' ) ) { wp_die( 'WooCommerce not available' ); }
-		$args = array(
-			'limit'   => $n,
-			'orderby' => 'date',
-			'order'   => 'DESC',
-			'return'  => 'ids',
-		);
+		$args = array( 'limit' => $n, 'orderby' => 'date', 'order' => 'DESC', 'return' => 'ids' );
 		$ids = wc_get_orders( $args );
 		@set_time_limit( 0 );
 		$count = 0;
@@ -692,6 +722,18 @@ class OS_Order_Sentinel {
 			$count++;
 		}
 		wp_safe_redirect( add_query_arg( 'ordersentinel_msg', rawurlencode( "Rescanned $count orders." ), admin_url( 'admin.php?page=ordersentinel' ) ) ); exit;
+	}
+
+	/** Force update check (clear transient + trigger fetch) */
+	public function handle_force_update_check() {
+		if ( ! current_user_can( 'update_plugins' ) || ! wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'ordersentinel_force_update_check' ) ) { wp_die( 'Not allowed' ); }
+		delete_site_transient( 'update_plugins' );
+		delete_transient( 'update_plugins' );
+		if ( ! function_exists( 'wp_update_plugins' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/update.php';
+		}
+		wp_update_plugins();
+		wp_safe_redirect( add_query_arg( 'ordersentinel_msg', rawurlencode( 'Update check forced. Visit Plugins page to see results.' ), admin_url( 'admin.php?page=ordersentinel&tab=settings' ) ) ); exit;
 	}
 
 	/** Report helper */
@@ -757,6 +799,7 @@ class OS_Order_Sentinel {
 		if ( version_compare( $rel['version'], $current_version, '>' ) ) {
 			$plugin_file = plugin_basename( __FILE__ );
 			$slug = dirname( $plugin_file ); // 'order-sentinel'
+			$icon_svg = plugins_url( 'assets/icon.svg', __FILE__ );
 			$update = (object) array(
 				'slug'        => $slug,
 				'plugin'      => $plugin_file,
@@ -765,6 +808,8 @@ class OS_Order_Sentinel {
 				'package'     => $rel['package'],
 				'tested'      => $rel['tested'],
 				'requires'    => $rel['requires'],
+				// Show a nice icon in Plugins/Updates UI
+				'icons'       => array( 'svg' => $icon_svg ),
 			);
 			$transient->response[ $plugin_file ] = $update;
 		}
@@ -782,6 +827,7 @@ class OS_Order_Sentinel {
 		$rel = $this->fetch_github_release( $repo, $opts['update_channel'], $opts['github_token'] );
 		if ( ! $rel ) { return $res; }
 
+		$icon_svg = plugins_url( 'assets/icon.svg', __FILE__ );
 		$info = (object) array(
 			'name'          => 'OrderSentinel',
 			'slug'          => $slug,
@@ -792,7 +838,9 @@ class OS_Order_Sentinel {
 			'sections'      => array(
 				'description' => 'Bulk/one-click OSINT on WooCommerce orders.',
 				'changelog'   => wp_kses_post( $rel['changelog'] ),
-			),
+						// Icons and optional banner for the modal
+			'icons'         => array( 'svg' => $icon_svg ),
+),
 		);
 		return $info;
 	}
@@ -801,33 +849,97 @@ class OS_Order_Sentinel {
 		$pd = get_plugin_data( __FILE__, false, false );
 		return isset( $pd['Version'] ) ? $pd['Version'] : '0.0.0';
 	}
+
+	/**
+	 * Robust GitHub release fetcher with diagnostics.
+	 * - Stable: prefers /releases/latest (non-prerelease), fallbacks to /releases list
+	 * - Beta: picks newest prerelease from list
+	 * Populates $this->last_updater_debug with endpoint/http/error.
+	 */
 	protected function fetch_github_release( $repo, $channel, $token = '' ) {
-		$api = 'https://api.github.com/repos/' . rawurlencode( $repo ) . '/releases';
+		$repo = trim( (string) $repo );
+		if ( '' === $repo ) { return null; }
+		// Encode owner/repo parts separately to avoid turning '/' into '%2F'
+		list( $owner, $name ) = array_pad( explode( '/', $repo, 2 ), 2, '' );
+		if ( '' === $owner || '' === $name ) { return null; }
+$base = 'https://api.github.com/repos/' . rawurlencode( $owner ) . '/' . rawurlencode( $name );
 		$headers = array( 'Accept' => 'application/vnd.github+json', 'User-Agent' => 'OrderSentinel-Updater' );
 		if ( $token ) { $headers['Authorization'] = 'token ' . $token; }
-		$resp = wp_remote_get( $api, array( 'timeout' => 10, 'headers' => $headers ) );
-		if ( is_wp_error( $resp ) ) { return null; }
-		$code = wp_remote_retrieve_response_code( $resp );
-		if ( $code !== 200 ) { return null; }
-		$list = json_decode( wp_remote_retrieve_body( $resp ), true );
-		if ( ! is_array( $list ) ) { return null; }
+		$this->last_updater_debug = array();
 
-		$want_prerelease = ( $channel === 'beta' );
-		$candidate = null;
-		foreach ( $list as $rel ) {
-			if ( ! empty( $rel['draft'] ) ) { continue; }
-			if ( (bool) $rel['prerelease'] !== $want_prerelease ) { continue; }
-			if ( ! $candidate || strtotime( $rel['published_at'] ) > strtotime( $candidate['published_at'] ) ) {
-				$candidate = $rel;
+		$try_endpoints = array();
+		if ( 'beta' === $channel ) {
+			$try_endpoints[] = $base . '/releases';
+		} else {
+			$try_endpoints[] = $base . '/releases/latest';
+			$try_endpoints[] = $base . '/releases';
+		}
+
+		foreach ( $try_endpoints as $ep ) {
+			$resp = wp_remote_get( $ep, array( 'timeout' => 12, 'headers' => $headers ) );
+			if ( is_wp_error( $resp ) ) {
+				$this->last_updater_debug = array( 'endpoint' => $ep, 'http' => 'wp_error', 'err' => $resp->get_error_message() );
+				continue;
+			}
+			$code = wp_remote_retrieve_response_code( $resp );
+			$body = wp_remote_retrieve_body( $resp );
+			$this->last_updater_debug = array( 'endpoint' => $ep, 'http' => (string) $code, 'err' => '' );
+
+			if ( 200 !== $code ) { continue; }
+
+			// Parse per endpoint shape
+			$data = json_decode( $body, true );
+			if ( 'beta' === $channel ) {
+				if ( ! is_array( $data ) ) { continue; }
+				$candidate = null;
+
+				// Prefer highest semantic version among prereleases; fallback to most recent by published_at
+				$best_version = null;
+				foreach ( $data as $rel ) {
+					if ( ! empty( $rel['draft'] ) || empty( $rel['prerelease'] ) ) { continue; }
+					$tag = isset( $rel['tag_name'] ) ? (string) $rel['tag_name'] : '';
+					$v = ltrim( $tag, 'vV' );
+					if ( $best_version === null || version_compare( $v, $best_version, '>' ) ) {
+						$best_version = $v;
+						$candidate = $rel;
+					}
+				}
+				if ( ! $candidate ) { continue; }
+				return $this->shape_release( $candidate, $repo );
+			} else {
+				// Stable via /releases/latest
+				if ( strpos( $ep, '/releases/latest' ) !== false ) {
+					if ( ! is_array( $data ) || ! empty( $data['prerelease'] ) ) {
+						// odd, fall through
+					} else {
+						return $this->shape_release( $data, $repo );
+					}
+				}
+				// Stable via list: pick highest semver among non-prerelease
+				if ( strpos( $ep, '/releases' ) !== false && is_array( $data ) ) {
+					$candidate = null; $best_version = null;
+					foreach ( $data as $rel ) {
+						if ( ! empty( $rel['draft'] ) || ! empty( $rel['prerelease'] ) ) { continue; }
+						$tag = isset( $rel['tag_name'] ) ? (string) $rel['tag_name'] : '';
+						$v = ltrim( $tag, 'vV' );
+						if ( $best_version === null || version_compare( $v, $best_version, '>' ) ) {
+							$best_version = $v;
+							$candidate = $rel;
+						}
+					}
+					if ( $candidate ) { return $this->shape_release( $candidate, $repo ); }
+				}
 			}
 		}
-		if ( ! $candidate ) { return null; }
+		return null;
+	}
 
-		$version = ltrim( (string) ( $candidate['tag_name'] ?? '' ), 'vV' );
-		$url     = (string) ( $candidate['html_url'] ?? '' );
+	protected function shape_release( $rel, $repo ) {
+		$version = ltrim( (string) ( $rel['tag_name'] ?? '' ), 'vV' );
+		$url     = (string) ( $rel['html_url'] ?? 'https://github.com/' . $repo );
 		$package = '';
-		if ( ! empty( $candidate['assets'] ) && is_array( $candidate['assets'] ) ) {
-			foreach ( $candidate['assets'] as $asset ) {
+		if ( ! empty( $rel['assets'] ) && is_array( $rel['assets'] ) ) {
+			foreach ( $rel['assets'] as $asset ) {
 				$name = (string) ( $asset['name'] ?? '' );
 				if ( preg_match( '/(OrderSentinel|order-sentinel).+\.zip$/i', $name ) ) {
 					$package = (string) $asset['browser_download_url'];
@@ -835,14 +947,17 @@ class OS_Order_Sentinel {
 				}
 			}
 		}
-		if ( '' === $package && ! empty( $candidate['zipball_url'] ) ) { $package = (string) $candidate['zipball_url']; }
+		// Fallback to zipball (works for detection; install may fail if top folder name mismatches)
+		if ( '' === $package && ! empty( $rel['zipball_url'] ) ) {
+			$package = (string) $rel['zipball_url'];
+		}
 		return array(
 			'version'   => $version ?: null,
-			'url'       => $url ?: 'https://github.com/' . $repo,
+			'url'       => $url,
 			'package'   => $package,
 			'requires'  => '5.8',
 			'tested'    => '6.6',
-			'changelog' => isset( $candidate['body'] ) ? wpautop( esc_html( $candidate['body'] ) ) : '',
+			'changelog' => isset( $rel['body'] ) ? wpautop( esc_html( $rel['body'] ) ) : '',
 		);
 	}
 }
@@ -851,3 +966,416 @@ register_activation_hook( __FILE__, array( 'OS_Order_Sentinel', 'activate' ) );
 register_uninstall_hook( __FILE__, array( 'OS_Order_Sentinel', 'uninstall' ) );
 
 new OS_Order_Sentinel();
+
+
+if ( class_exists( 'OS_Order_Sentinel_REST' ) ) {
+	add_action( 'plugins_loaded', function () {
+		if ( is_admin() && current_user_can( 'manage_woocommerce' ) ) {
+			if ( ! isset( $GLOBALS['ordersentinel_rest'] ) || ! ( $GLOBALS['ordersentinel_rest'] instanceof OS_Order_Sentinel_REST ) ) {
+				$GLOBALS['ordersentinel_rest'] = new OS_Order_Sentinel_REST();
+			}
+		}
+	}, 9 );
+}
+
+/**
+ * === OrderSentinel: REST Monitor (append-only module) ===
+ * Tracks REST API usage to help identify abuse vs. normal plugin traffic.
+ * Adds a "OrderSentinel REST" submenu with dashboard + settings + exports.
+ */
+if ( ! class_exists( 'OS_Order_Sentinel_REST' ) ) :
+class OS_Order_Sentinel_REST {
+	private $tbl;
+	private $opt_key;
+	private static $req_times = array();
+
+	public function __construct() {
+		global $wpdb;
+		$this->tbl = $wpdb->prefix . 'ordersentinel_restlog';
+		// Reuse the main option if present, else our own.
+		$this->opt_key = class_exists('OS_Order_Sentinel') ? OS_Order_Sentinel::OPTION_KEY : 'ordersentinel_options';
+
+		// Ensure table + retention on admin requests (cheap).
+		add_action( 'admin_init', array( $this, 'maybe_migrate' ) );
+
+		// REST hooks (log every request if enabled).
+		add_filter( 'rest_request_before_callbacks', array( $this, 'rest_before' ), 10, 3 );
+		add_filter( 'rest_request_after_callbacks',  array( $this, 'rest_after' ),  10, 3 );
+
+		// Legacy Woo API (best-effort marker).
+		add_action( 'woocommerce_api_request', array( $this, 'mark_legacy_wc_api' ), 10, 1 );
+
+		// Admin UI
+		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
+
+		// Admin actions
+		add_action( 'admin_post_ordersentinel_purge_rest', array( $this, 'handle_purge_rest' ) );
+		add_action( 'admin_post_ordersentinel_export_blocklist', array( $this, 'handle_export_blocklist' ) );
+	}
+
+	/* ---------- Settings helpers ---------- */
+	private function get_options() {
+		$defaults = array(
+			'rest_monitor_enable'   => 1,
+			'rest_threshold_hour'   => 200, // requests per IP per hour to flag
+			'rest_retention_days'   => 7,
+			'rest_trust_proxies'    => 0,   // if 1, use first IP in X-Forwarded-For
+		);
+		$o = get_option( $this->opt_key, array() );
+		foreach ( $defaults as $k => $v ) {
+			if ( ! isset( $o[ $k ] ) ) { $o[ $k ] = $v; }
+		}
+		return $o;
+	}
+	private function update_options( $new ) {
+		$o = get_option( $this->opt_key, array() );
+		update_option( $this->opt_key, array_merge( $o, $new ) );
+	}
+
+	/* ---------- DB ---------- */
+	public function maybe_migrate() {
+		global $wpdb;
+		$charset = $wpdb->get_charset_collate();
+		$sql = "CREATE TABLE {$this->tbl} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			ts DATETIME NOT NULL,
+			ip VARCHAR(45) NOT NULL DEFAULT '',
+			method VARCHAR(10) NOT NULL DEFAULT '',
+			route VARCHAR(191) NOT NULL DEFAULT '',
+			status SMALLINT NOT NULL DEFAULT 0,
+			user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			ua VARCHAR(191) NOT NULL DEFAULT '',
+			ref VARCHAR(191) NOT NULL DEFAULT '',
+			took_ms INT NOT NULL DEFAULT 0,
+			flags VARCHAR(50) NOT NULL DEFAULT '', -- 'wc_legacy' marker or others later
+			PRIMARY KEY (id),
+			KEY ts (ts),
+			KEY ip (ip),
+			KEY route (route)
+		) $charset;";
+		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+		dbDelta( $sql );
+
+		// Retention purge (lazy).
+		$opts = $this->get_options();
+		$days = max(1, intval($opts['rest_retention_days']));
+		$cut  = gmdate('Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ));
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$this->tbl} WHERE ts < %s", $cut ) ); // phpcs:ignore
+	}
+
+	/* ---------- REST capture ---------- */
+	public function rest_before( $response, $handler, $request ) {
+		$opts = $this->get_options();
+		if ( empty( $opts['rest_monitor_enable'] ) ) { return $response; }
+		$key = spl_object_hash( $request );
+		self::$req_times[ $key ] = microtime( true );
+		return $response;
+	}
+	public function rest_after( $response, $handler, $request ) {
+		$opts = $this->get_options();
+		if ( empty( $opts['rest_monitor_enable'] ) ) { return $response; }
+		$key = spl_object_hash( $request );
+		$start = isset( self::$req_times[ $key ] ) ? self::$req_times[ $key ] : microtime(true);
+		unset( self::$req_times[ $key ] );
+		$elapsed = (int) round( ( microtime(true) - $start ) * 1000 );
+
+		// Build log row
+		$ip  = $this->client_ip( $request, ! empty( $opts['rest_trust_proxies'] ) );
+		$ua  = $this->truncate( $this->server_or_header( $request, 'HTTP_USER_AGENT', 'user-agent' ), 190 );
+		$ref = $this->truncate( $this->server_or_header( $request, 'HTTP_REFERER', 'referer' ), 190 );
+		$st  = ( $response instanceof WP_REST_Response ) ? (int) $response->get_status() : ( is_wp_error($response) ? 500 : 200 );
+		$route  = $request->get_route();
+		$method = strtoupper( $request->get_method() );
+		$uid    = get_current_user_id();
+
+		global $wpdb;
+		$wpdb->insert( $this->tbl, array(
+			'ts'      => current_time( 'mysql', 1 ), // GMT
+			'ip'      => $ip,
+			'method'  => $method,
+			'route'   => $this->truncate( $route, 190 ),
+			'status'  => $st,
+			'user_id' => $uid,
+			'ua'      => $ua,
+			'ref'     => $ref,
+			'took_ms' => $elapsed,
+			'flags'   => '',
+		), array( '%s','%s','%s','%s','%d','%d','%s','%s','%d','%s' ) );
+
+		return $response;
+	}
+	public function mark_legacy_wc_api( $endpoint ) {
+		// Tagging legacy Woo API hits when hook fires
+		global $wpdb;
+		$ip = $this->client_ip(null, false);
+		$wpdb->insert( $this->tbl, array(
+			'ts'      => current_time( 'mysql', 1 ),
+			'ip'      => $ip,
+			'method'  => 'GET',
+			'route'   => $this->truncate( '/wc-api/' . ltrim( (string)$endpoint, '/' ), 190 ),
+			'status'  => 0,
+			'user_id' => get_current_user_id(),
+			'ua'      => $this->truncate( $_SERVER['HTTP_USER_AGENT'] ?? '', 190 ),
+			'ref'     => $this->truncate( $_SERVER['HTTP_REFERER'] ?? '', 190 ),
+			'took_ms' => 0,
+			'flags'   => 'wc_legacy',
+		) );
+	}
+
+	private function server_or_header( $request, $server_key, $header ) {
+		if ( $request instanceof WP_REST_Request ) {
+			$h = $request->get_header( $header );
+			if ( $h ) { return $h; }
+		}
+		return $_SERVER[ $server_key ] ?? '';
+	}
+	private function client_ip( $request = null, $trust_proxies = false ) {
+		$xff = $request instanceof WP_REST_Request ? $request->get_header( 'x-forwarded-for' ) : ( $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '' );
+		if ( $trust_proxies && $xff ) {
+			$first = trim( explode( ',', $xff )[0] );
+			if ( filter_var( $first, FILTER_VALIDATE_IP ) ) { return $first; }
+		}
+		$ra = $request instanceof WP_REST_Request ? $request->get_header( 'x-real-ip' ) : ( $_SERVER['HTTP_X_REAL_IP'] ?? '' );
+		if ( $trust_proxies && $ra && filter_var( $ra, FILTER_VALIDATE_IP ) ) { return $ra; }
+		$ip = $_SERVER['REMOTE_ADDR'] ?? '';
+		return $ip ?: '0.0.0.0';
+	}
+	private function truncate( $s, $n ) { $s = (string)$s; return ( strlen($s) > $n ) ? substr($s, 0, $n) : $s; }
+
+	/* ---------- Admin UI ---------- */
+	public function admin_menu() {
+		add_submenu_page(
+			'woocommerce',
+			'OrderSentinel REST',
+			'OrderSentinel REST',
+			'manage_woocommerce',
+			'ordersentinel-rest',
+			array( $this, 'render_page' )
+		);
+	}
+
+	public function render_page() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) { return; }
+		$opts = $this->get_options();
+		$tab = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : 'dashboard';
+		echo '<div class="wrap"><h1>OrderSentinel — REST Monitor</h1>';
+		echo '<h2 class="nav-tab-wrapper">';
+		printf('<a href="%s" class="nav-tab %s">Dashboard</a>', esc_url( admin_url('admin.php?page=ordersentinel-rest&tab=dashboard') ), $tab==='dashboard'?'nav-tab-active':'' );
+		printf('<a href="%s" class="nav-tab %s">Settings</a>',  esc_url( admin_url('admin.php?page=ordersentinel-rest&tab=settings') ),  $tab==='settings' ?'nav-tab-active':'' );
+		printf('<a href="%s" class="nav-tab %s">Orders (+Payment)</a>',  esc_url( admin_url('admin.php?page=ordersentinel-rest&tab=orders') ),  $tab==='orders' ?'nav-tab-active':'' );
+		echo '</h2>';
+
+		if ( 'settings' === $tab ) {
+			echo '<form method="post">';
+			wp_nonce_field( 'ordersentinel_rest_save' );
+			echo '<table class="form-table"><tbody>';
+			echo '<tr><th scope="row">Enable REST logging</th><td><label><input type="checkbox" name="rest_monitor_enable" value="1" '.checked(1,!empty($opts['rest_monitor_enable']),false).' /> Log REST API requests</label></td></tr>';
+			echo '<tr><th scope="row">Flag threshold (per IP, per hour)</th><td><input type="number" name="rest_threshold_hour" min="10" max="100000" value="'.intval($opts['rest_threshold_hour']).'" /></td></tr>';
+			echo '<tr><th scope="row">Retention (days)</th><td><input type="number" name="rest_retention_days" min="1" max="365" value="'.intval($opts['rest_retention_days']).'" /> <span class="description">Older rows auto-purged.</span></td></tr>';
+			echo '<tr><th scope="row">Trust proxies</th><td><label><input type="checkbox" name="rest_trust_proxies" value="1" '.checked(1,!empty($opts['rest_trust_proxies']),false).' /> Use first IP in <code>X-Forwarded-For</code></label></td></tr>';
+			echo '</tbody></table>';
+			submit_button( 'Save settings' );
+			echo '</form>';
+			echo '<hr /><form method="post" action="'.esc_url( admin_url('admin-post.php?action=ordersentinel_purge_rest') ).'">';
+			wp_nonce_field( 'ordersentinel_purge_rest' );
+			submit_button( 'Purge logs older than retention now', 'secondary', 'purge_now', false );
+			echo '</form>';
+			echo '</div>';
+			return;
+		}
+
+		if ( 'orders' === $tab ) {
+			$this->render_orders_with_payment();
+			echo '</div>';
+			return;
+		}
+
+		// Dashboard
+		$probe = $this->probe_rest();
+		echo '<h2>REST status</h2>';
+		printf('<p>GET <code>/wp-json/</code>: <strong>%s</strong>%s</p>',
+			$probe['code'] ? intval($probe['code']) : 'n/a',
+			$probe['msg'] ? ' — ' . esc_html($probe['msg']) : ''
+		);
+
+		list($topIps, $topRoutes, $suspicious) = $this->summaries();
+		echo '<div class="metabox-holder" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;">';
+		$this->render_counts_card('Top IPs (24h)', $topIps, 'ip');
+		$this->render_counts_card('Top Routes (24h)', $topRoutes, 'route');
+		$this->render_counts_card('Suspicious IPs (last hr)', $suspicious, 'ip', true);
+		echo '</div>';
+
+		echo '<form method="post" action="'.esc_url( admin_url('admin-post.php?action=ordersentinel_export_blocklist') ).'" style="margin-top:12px;">';
+		wp_nonce_field( 'ordersentinel_export_blocklist' );
+		submit_button( 'Export suspicious IPs (.htaccess/nginx snippets)', 'secondary', 'export_block', false );
+		echo '</form>';
+		echo '</div>';
+	}
+
+	private function probe_rest() {
+		$url = home_url( '/wp-json/' );
+		$resp = wp_remote_get( $url, array( 'timeout' => 8 ) );
+		if ( is_wp_error( $resp ) ) { return array( 'code' => 0, 'msg' => $resp->get_error_message() ); }
+		$code = wp_remote_retrieve_response_code( $resp );
+		$body = wp_remote_retrieve_body( $resp );
+		$msg = '';
+		if ( $body ) {
+			$j = json_decode( $body, true );
+			if ( is_array( $j ) && isset( $j['message'] ) ) { $msg = $j['message']; }
+		}
+		return array( 'code' => $code, 'msg' => $msg );
+	}
+
+	private function summaries() {
+		global $wpdb;
+		$now = time();
+		$cut24 = gmdate( 'Y-m-d H:i:s', $now - DAY_IN_SECONDS );
+		$rows1 = $wpdb->get_results( $wpdb->prepare( "SELECT ip, COUNT(*) c FROM {$this->tbl} WHERE ts >= %s GROUP BY ip ORDER BY c DESC LIMIT 20", $cut24 ) );
+		$rows2 = $wpdb->get_results( $wpdb->prepare( "SELECT route, COUNT(*) c FROM {$this->tbl} WHERE ts >= %s GROUP BY route ORDER BY c DESC LIMIT 20", $cut24 ) );
+
+		$opts = $this->get_options();
+		$cut1h = gmdate( 'Y-m-d H:i:s', $now - HOUR_IN_SECONDS );
+		$th = max(10, intval($opts['rest_threshold_hour']));
+		$rows3 = $wpdb->get_results( $wpdb->prepare( "SELECT ip, COUNT(*) c FROM {$this->tbl} WHERE ts >= %s GROUP BY ip HAVING c >= %d ORDER BY c DESC LIMIT 50", $cut1h, $th ) );
+
+		$topIps = array(); foreach ( (array)$rows1 as $r ) { $topIps[ $r->ip ] = (int)$r->c; }
+		$topRoutes = array(); foreach ( (array)$rows2 as $r ) { $topRoutes[ $r->route ] = (int)$r->c; }
+		$suspicious = array(); foreach ( (array)$rows3 as $r ) { $suspicious[ $r->ip ] = (int)$r->c; }
+		return array( $topIps, $topRoutes, $suspicious );
+	}
+	private function render_counts_card( $title, $counts, $label, $highlight=false ) {
+		echo '<div class="postbox"><h2 class="hndle" style="padding:8px 12px;">'.esc_html($title).'</h2><div class="inside"><table class="widefat striped"><thead><tr><th>'.esc_html(ucfirst($label)).'</th><th>Count</th></tr></thead><tbody>';
+		if ( empty( $counts ) ) { echo '<tr><td colspan="2"><em>None</em></td></tr>'; }
+		foreach ( $counts as $k => $v ) {
+			printf('<tr><td>%s</td><td%s>%d</td></tr>', esc_html($k), $highlight?' style="color:#c00;font-weight:600;"':'', intval($v));
+		}
+		echo '</tbody></table></div></div>';
+	}
+
+	private function render_orders_with_payment() {
+		if ( ! class_exists( 'WooCommerce' ) ) {
+			echo '<p><em>WooCommerce not active.</em></p>'; return;
+		}
+		global $wpdb; $tbl = $wpdb->prefix . 'ordersentinel';
+		if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $tbl ) ) !== $tbl ) {
+			echo '<p><em>No research table found yet. Run research via Orders list bulk action.</em></p>'; return;
+		}
+		$rows = $wpdb->get_results( "SELECT * FROM {$tbl} ORDER BY id DESC LIMIT 200" );
+		echo '<h2>Recent research (with Payment)</h2>';
+		echo '<table class="widefat striped"><thead><tr><th>When</th><th>Order</th><th>IP</th><th>Gateway</th><th>Method</th><th>Geo/ISP</th><th>ASN</th><th>AbuseIPDB</th></tr></thead><tbody>';
+		foreach ( $rows as $row ) {
+			$r = json_decode( $row->data, true ); if ( ! is_array($r) ) { continue; }
+			$order = wc_get_order( (int)$row->order_id );
+			$gateway_id = $order ? $order->get_payment_method() : '';
+			$gateway_name = $order ? $order->get_payment_method_title() : '';
+			$geo = $r['lookups']['geo'] ?? array();
+			$ab  = $r['lookups']['abuseipdb']['data'] ?? array();
+			printf(
+				'<tr><td>%s</td><td><a href="%s">#%d</a></td><td>%s</td><td>%s</td><td>%s</td><td>%s, %s — %s</td><td>%s</td><td>%s%% / %s</td></tr>',
+				esc_html( $row->created_at ),
+				esc_url( get_edit_post_link( (int)$row->order_id ) ),
+				(int)$row->order_id,
+				esc_html( $row->ip ),
+				esc_html( $gateway_id ),
+				esc_html( $gateway_name ),
+				esc_html( $geo['city'] ?? '' ), esc_html( $geo['country'] ?? '' ), esc_html( $geo['isp'] ?? '' ),
+				esc_html( $geo['as'] ?? '' ),
+				isset( $ab['abuseConfidenceScore'] ) ? intval( $ab['abuseConfidenceScore'] ) : '',
+				isset( $ab['totalReports'] ) ? intval( $ab['totalReports'] ) : ''
+			);
+		}
+		if ( empty( $rows ) ) { echo '<tr><td colspan="8"><em>No rows yet.</em></td></tr>'; }
+		echo '</tbody></table>';
+	}
+
+	/* ---------- Admin actions ---------- */
+	public function handle_purge_rest() {
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'ordersentinel_purge_rest' ) ) { wp_die('Not allowed'); }
+		$this->maybe_migrate(); // ensures table exists
+		$opts = $this->get_options();
+		$days = max(1, intval($opts['rest_retention_days']));
+		global $wpdb;
+		$cut  = gmdate('Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ));
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$this->tbl} WHERE ts < %s", $cut ) );
+		wp_safe_redirect( admin_url( 'admin.php?page=ordersentinel-rest&tab=settings' ) ); exit;
+	}
+	public function handle_export_blocklist() {
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'ordersentinel_export_blocklist' ) ) { wp_die('Not allowed'); }
+		$opts = $this->get_options();
+		$th = max(10, intval($opts['rest_threshold_hour']));
+		global $wpdb;
+		$cut = gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS );
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT ip, COUNT(*) c FROM {$this->tbl} WHERE ts >= %s GROUP BY ip HAVING c >= %d ORDER BY c DESC LIMIT 1000", $cut, $th ) );
+		$ips = array(); foreach ( (array)$rows as $r ) { if ( filter_var($r->ip, FILTER_VALIDATE_IP) ) $ips[] = $r->ip; }
+		nocache_headers();
+		header('Content-Type: text/plain; charset=utf-8');
+		header('Content-Disposition: attachment; filename=ordersentinel-blocklist.txt');
+		echo "# Apache .htaccess snippet\n<IfModule mod_authz_core.c>\n\t<RequireAll>\n\t\tRequire all granted\n";
+		foreach ( $ips as $ip ) { echo "\t\tRequire not ip {$ip}\n"; }
+		echo "\t</RequireAll>\n</IfModule>\n\n";
+		echo "# NGINX snippet\n# map \$remote_addr \$os_block { \n#   default 0;\n";
+		foreach ( $ips as $ip ) { echo "#   {$ip} 1;\n"; }
+		echo "# }\n# server { if (\$os_block) { return 403; } ... }\n";
+		exit;
+	}
+
+	/* ---------- Settings form handler ---------- */
+	public function maybe_handle_settings_post() {
+		if ( isset($_POST['rest_monitor_enable']) || isset($_POST['rest_threshold_hour']) || isset($_POST['rest_retention_days']) || isset($_POST['rest_trust_proxies']) ) {
+			check_admin_referer( 'ordersentinel_rest_save' );
+			$this->update_options( array(
+				'rest_monitor_enable' => empty($_POST['rest_monitor_enable']) ? 0 : 1,
+				'rest_threshold_hour' => max(10, intval($_POST['rest_threshold_hour'] ?? 200)),
+				'rest_retention_days' => max(1, intval($_POST['rest_retention_days'] ?? 7)),
+				'rest_trust_proxies'  => empty($_POST['rest_trust_proxies']) ? 0 : 1,
+			) );
+			add_action( 'admin_notices', function() {
+				echo '<div class="notice notice-success is-dismissible"><p>OrderSentinel REST settings saved.</p></div>';
+			} );
+		}
+	}
+}
+add_action( 'admin_init', function(){ if ( current_user_can('manage_woocommerce') ) { $m = new OS_Order_Sentinel_REST(); $m->maybe_handle_settings_post(); } } );
+endif;
+
+
+if ( ! function_exists( 'ordersentinel_export_rest_csv' ) ) {
+	function ordersentinel_export_rest_csv() {
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_REQUEST['_wpnonce'] ?? '', 'ordersentinel_export_rest_csv' ) ) { wp_die('Not allowed'); }
+		global $wpdb;
+		$tbl = $wpdb->prefix . 'ordersentinel_restlog';
+		if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $tbl ) ) !== $tbl ) { wp_die('No REST log table'); }
+		$days = isset( $_GET['days'] ) ? max(1, min(365, intval($_GET['days']))) : 1;
+		$cut  = gmdate('Y-m-d H:i:s', time() - ($days * DAY_IN_SECONDS));
+		$rows = $wpdb->get_results( $wpdb->prepare( \"SELECT ts, ip, method, route, status, user_id, ua, ref, took_ms, flags FROM {$tbl} WHERE ts >= %s ORDER BY id DESC LIMIT 50000\", $cut ), ARRAY_A );
+		nocache_headers();
+		header('Content-Type: text/csv; charset=utf-8');
+		header('Content-Disposition: attachment; filename=ordersentinel-rest-' . $days . 'd.csv');
+		$out = fopen('php://output','w');
+		fputcsv($out, ['ts','ip','method','route','status','user_id','ua','ref','took_ms','flags']);
+		foreach ( (array) $rows as $r ) { fputcsv($out, $r); }
+		fclose($out); exit;
+	}
+	add_action('admin_post_ordersentinel_export_rest_csv', 'ordersentinel_export_rest_csv');
+}
+
+
+if ( ! function_exists( 'ordersentinel_mark_payment_failed' ) ) {
+	function ordersentinel_mark_payment_failed( $order_id ) {
+		$order_id = absint( $order_id ); if ( ! $order_id ) { return; }
+		$fails = (int) get_post_meta( $order_id, '_ordersentinel_payment_fails', true );
+		update_post_meta( $order_id, '_ordersentinel_payment_fails', $fails + 1 );
+		if ( function_exists('wc_get_order') ) {
+			$order = wc_get_order( $order_id );
+			if ( $order ) {
+				$gw = $order->get_payment_method() ?: 'unknown';
+				$map = get_post_meta( $order_id, '_ordersentinel_gateway_fails', true );
+				if ( ! is_array( $map ) ) { $map = array(); }
+				$map[ $gw ] = isset( $map[ $gw ] ) ? (int)$map[ $gw ] + 1 : 1;
+				update_post_meta( $order_id, '_ordersentinel_gateway_fails', $map );
+			}
+		}
+	}
+	add_action( 'woocommerce_order_status_failed', 'ordersentinel_mark_payment_failed', 10, 1 );
+}
+

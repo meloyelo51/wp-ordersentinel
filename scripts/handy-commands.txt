@@ -2,6 +2,51 @@
 git fetch --tags
 gh release list
 
+#Build ZIP File
+py scripts/build-plugin-zip.py
+# sanity: should print ...dist/OrderSentinel-X.X.X.zip and a manifest
+
+#Apply the patch with scrips\save-chat-patch.sh
+
+Option A — interactive (waits for your paste)
+# from repo root
+bash scripts/save-chat-patch.sh <<'PATCH'
+# paste the REAL unified diff here, exactly as provided (starts with "diff --git ...")
+# ...
+# end your paste with a line that contains only:
+PATCH
+# (in Git Bash, typing the closing PATCH line is enough; Ctrl-D also works)
+
+
+Option B — one-shot (diff inline in the same paste)
+# from repo root — paste the command AND the full diff between the PATCH markers
+bash scripts/save-chat-patch.sh <<'PATCH'
+diff --git a/path/to/file b/path/to/file
+--- a/path/to/file
++++ b/path/to/file
+@@
+# ... full diff contents ...
+PATCH
+
+
+Option C — via file (sometimes easiest on Windows)
+# save the diff to a file, then apply
+cat > my.patch <<'PATCH'
+# (full unified diff here)
+PATCH
+bash scripts/save-chat-patch.sh < my.patch
+
+
+Quick sanity after applying:
+git status
+git diff --stat
+
+
+#EXAMPLE
+# Verify (syntax check) + try again
+bash -n scripts/release-github.sh
+bash scripts/release-github.sh -r meloyelo51/wp-ordersentinel -v 0.2.2 -t v0.2.2 -n "OrderSentinel 0.2.2: fixes + GitHub updater."
+
 # Update an existing release asset (replace ZIP)
 gh release upload v0.2.2 dist/OrderSentinel-0.2.2.zip --clobber
 

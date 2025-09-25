@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="OrderSentinel">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <path d="M128 16l80 24v64c0 56-36 105-80 136-44-31-80-80-80-136V40l80-24z" fill="url(#g)"/>
+  <circle cx="128" cy="112" r="56" fill="none" stroke="white" stroke-width="10" opacity="0.85"/>
+  <g fill="white" font-family="Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif" font-weight="700" text-anchor="middle">
+    <text x="128" y="122" font-size="54">OS</text>
+  </g>
+</svg>
