@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OrderSentinel — Fraud/OSINT helper for WooCommerce orders
  * Description: Bulk/one-click OSINT on WooCommerce orders (RDAP, geoloc, AbuseIPDB). Includes dashboard, CSV export, optional non-PII AbuseIPDB reporting, and GitHub updates.
- * Version: 0.3.0
+ * Version: 0.3.3
  * Author: Matt's Basement Arcade
  * Text Domain: order-sentinel
  */
@@ -20,6 +20,8 @@ class OS_Order_Sentinel {
 	protected $last_updater_debug = array();
 
 	public function __construct() {
+		// Ensure table exists early for REST context
+		add_action( 'rest_api_init', array( $this, 'maybe_migrate' ) );
 		add_action( 'init', array( $this, 'bootstrap' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'admin_assets' ) );
 
@@ -103,7 +105,11 @@ class OS_Order_Sentinel {
 		if ( ! $this->table_exists() || get_option( self::DBV_OPTION ) !== self::DB_VERSION ) {
 			self::create_or_upgrade_table();
 		}
-		if ( ! get_option( 'ordersentinel_backfilled' ) && class_exists( 'WooCommerce' ) && function_exists( 'wc_get_orders' ) ) {
+		
+
+	
+
+if ( ! get_option( 'ordersentinel_backfilled' ) && class_exists( 'WooCommerce' ) && function_exists( 'wc_get_orders' ) ) {
 			$after_str = wp_date( 'Y-m-d H:i:s', time() - ( 90 * DAY_IN_SECONDS ) );
 			$args = array(
 				'limit'      => 200,
@@ -966,14 +972,6 @@ register_activation_hook( __FILE__, array( 'OS_Order_Sentinel', 'activate' ) );
 register_uninstall_hook( __FILE__, array( 'OS_Order_Sentinel', 'uninstall' ) );
 
 new OS_Order_Sentinel();
-
-
-if ( class_exists( 'OS_Order_Sentinel_REST' ) ) {
-	add_action( 'plugins_loaded', function () {
-		if ( is_admin() && current_user_can( 'manage_woocommerce' ) ) {
-			if ( ! isset( $GLOBALS['ordersentinel_rest'] ) || ! ( $GLOBALS['ordersentinel_rest'] instanceof OS_Order_Sentinel_REST ) ) {
-				$GLOBALS['ordersentinel_rest'] = new OS_Order_Sentinel_REST();
-			}
 		}
 	}, 9 );
 }
@@ -990,6 +988,10 @@ class OS_Order_Sentinel_REST {
 	private static $req_times = array();
 
 	public function __construct() {
+		add_action( 'admin_post_ordersentinel_export_rest_csv', array( $this, 'handle_export_csv' ) );
+
+		add_action( 'rest_api_init', array( $this, 'maybe_migrate' ) );
+
 		global $wpdb;
 		$this->tbl = $wpdb->prefix . 'ordersentinel_restlog';
 		// Reuse the main option if present, else our own.
@@ -1072,6 +1074,20 @@ class OS_Order_Sentinel_REST {
 		return $response;
 	}
 	public function rest_after( $response, $handler, $request ) {
+		! $this->ensure_table_exists() ) { return $response; }
+
+		if ( ! $this->ensure_table_exis
+	private function ensure_table_exists() {
+		global $wpdb;
+		$table = $this->tbl;
+		$exists = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table );
+		if ( $exists ) { return true; }
+		$this->maybe_migrate();
+		$exists = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table );
+		return $exists;
+	}
+ts() ) { return $response; }
+
 		$opts = $this->get_options();
 		if ( empty( $opts['rest_monitor_enable'] ) ) { return $response; }
 		$key = spl_object_hash( $request );
@@ -1088,6 +1104,7 @@ class OS_Order_Sentinel_REST {
 		$method = strtoupper( $request->get_method() );
 		$uid    = get_current_user_id();
 
+		if ( ! \$this->ensure_table_exists() ) { return \$response; }
 		global $wpdb;
 		$wpdb->insert( $this->tbl, array(
 			'ts'      => current_time( 'mysql', 1 ), // GMT
@@ -1105,8 +1122,11 @@ class OS_Order_Sentinel_REST {
 		return $response;
 	}
 	public function mark_legacy_wc_api( $endpoint ) {
+		! $this->ensure_table_exists() ) { return; }
+
 		// Tagging legacy Woo API hits when hook fires
 		global $wpdb;
+		if ( ! \$this->ensure_table_exists() ) { return; }
 		$ip = $this->client_ip(null, false);
 		$wpdb->insert( $this->tbl, array(
 			'ts'      => current_time( 'mysql', 1 ),
@@ -1334,6 +1354,22 @@ class OS_Order_Sentinel_REST {
 			} );
 		}
 	}
+
+	public function handle_export_csv() {
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_REQUEST['_wpnonce'] ?? '', 'ordersentinel_export_rest_csv' ) ) { wp_die('Not allowed'); }
+		if ( ! $this->ensure_table_exists() ) { wp_die('No table'); }
+		global $wpdb;
+		$days = isset( $_GET['days'] ) ? max(1, min(365, intval($_GET['days']))) : 7;
+		$cut  = gmdate( 'Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ) );
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT ts, ip, method, route, status, user_id, ua, ref, took_ms, flags FROM {$this->tbl} WHERE ts >= %s ORDER BY id DESC LIMIT 50000", $cut ), ARRAY_A ); // phpcs:ignore
+		nocache_headers();
+		header( 'Content-Type: text/csv; charset=utf-8' );
+		header( 'Content-Disposition: attachment; filename=ordersentinel-rest-' . $days . 'd.csv' );
+		$out = fopen( 'php://output', 'w' );
+		fputcsv( $out, array( 'ts','ip','method','route','status','user_id','ua','ref','took_ms','flags' ) );
+		foreach ( (array) $rows as $r ) { fputcsv( $out, $r ); }
+		fclose( $out ); exit;
+	}
 }
 add_action( 'admin_init', function(){ if ( current_user_can('manage_woocommerce') ) { $m = new OS_Order_Sentinel_REST(); $m->maybe_handle_settings_post(); } } );
 endif;
@@ -1341,13 +1377,29 @@ endif;
 
 if ( ! function_exists( 'ordersentinel_export_rest_csv' ) ) {
 	function ordersentinel_export_rest_csv() {
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_REQUEST['_wpnonce'] ?? '', 'ordersentinel_export_rest_csv' ) 
+	public function handle_export_csv() {
 		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_REQUEST['_wpnonce'] ?? '', 'ordersentinel_export_rest_csv' ) ) { wp_die('Not allowed'); }
+		if ( ! $this->ensure_table_exists() ) { wp_die('No table'); }
+		global $wpdb;
+		$days = isset( $_GET['days'] ) ? max(1, min(365, intval($_GET['days']))) : 7;
+		$cut  = gmdate( 'Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ) );
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT ts, ip, method, route, status, user_id, ua, ref, took_ms, flags FROM {$this->tbl} WHERE ts >= %s ORDER BY id DESC LIMIT 50000", $cut ), ARRAY_A ); // phpcs:ignore
+		nocache_headers();
+		header( 'Content-Type: text/csv; charset=utf-8' );
+		header( 'Content-Disposition: attachment; filename=ordersentinel-rest-' . $days . 'd.csv' );
+		$out = fopen( 'php://output', 'w' );
+		fputcsv( $out, array( 'ts','ip','method','route','status','user_id','ua','ref','took_ms','flags' ) );
+		foreach ( (array) $rows as $r ) { fputcsv( $out, $r ); }
+		fclose( $out ); exit;
+	}
+) { wp_die('Not allowed'); }
 		global $wpdb;
 		$tbl = $wpdb->prefix . 'ordersentinel_restlog';
 		if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $tbl ) ) !== $tbl ) { wp_die('No REST log table'); }
 		$days = isset( $_GET['days'] ) ? max(1, min(365, intval($_GET['days']))) : 1;
 		$cut  = gmdate('Y-m-d H:i:s', time() - ($days * DAY_IN_SECONDS));
-		$rows = $wpdb->get_results( $wpdb->prepare( \"SELECT ts, ip, method, route, status, user_id, ua, ref, took_ms, flags FROM {$tbl} WHERE ts >= %s ORDER BY id DESC LIMIT 50000\", $cut ), ARRAY_A );
+		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT ts, ip, method, route, status, user_id, ua, ref, took_ms, flags FROM {$tbl} WHERE ts >= %s ORDER BY id DESC LIMIT 50000", $cut ), ARRAY_A );
 		nocache_headers();
 		header('Content-Type: text/csv; charset=utf-8');
 		header('Content-Disposition: attachment; filename=ordersentinel-rest-' . $days . 'd.csv');
@@ -1377,5 +1429,26 @@ if ( ! function_exists( 'ordersentinel_mark_payment_failed' ) ) {
 		}
 	}
 	add_action( 'woocommerce_order_status_failed', 'ordersentinel_mark_payment_failed', 10, 1 );
+}
+
+/* OS REST bootstrap v2 */
+add_action( 'plugins_loaded', function() {
+    // Register the bootstrap regardless of declaration order; check class at runtime.
+    if ( is_admin() && current_user_can( 'manage_woocommerce' ) && class_exists( 'OS_Order_Sentinel_REST' ) ) {
+        if ( ! isset( $GLOBALS['ordersentinel_rest'] ) || ! ( $GLOBALS['ordersentinel_rest'] instanceof OS_Order_Sentinel_REST ) ) {
+            $GLOBALS['ordersentinel_rest'] = new OS_Order_Sentinel_REST();
+        }
+    }
+}, 9 );
+
+
+/* Ensure REST table on activate */
+if ( ! function_exists( 'ordersentinel_on_activate' ) ) {
+	function ordersentinel_on_activate() {
+		if ( class_exists( 'OS_Order_Sentinel_REST' ) ) {
+			$m = new OS_Order_Sentinel_REST(); $m->maybe_migrate();
+		}
+	}
+	register_activation_hook( __FILE__, 'ordersentinel_on_activate' );
 }
 
