@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name: (MU) OrderSentinel — REST Monitor
- * Description: REST + search logger for OrderSentinel. IPv4-friendly, optional bot verification, light rate-limits. Tools include Backup & Purge and Repair truncated IPs. Creates table early to avoid races.
+ * Description: REST + search logger for OrderSentinel. IPv4-friendly, optional bot verification, light rate-limits. Tools include Backup & Purge and Repair truncated IPs. Creates table early to avoid races. Now with Allowlist.
  * Author: Matt's Basement Arcade
- * Version: 0.3.11-mu10
+ * Version: 0.3.12-mu11
  */
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
@@ -13,6 +13,7 @@ class OS_REST_Monitor {
 	private $tbl;
 	private $opt_key = 'ordersentinel_options';
 	private static $req_times = array();
+	private $allow = null; // compiled allowlist (per request)
 
 	public function __construct() {
 		global $wpdb;
@@ -31,7 +32,7 @@ class OS_REST_Monitor {
 		add_action( 'template_redirect', array( $this, 'maybe_log_and_limit_search' ), 1 );
 		add_action( 'woocommerce_api_request', array( $this, 'mark_legacy_wc_api' ), 10, 1 );
 
-		// NEW: debug routes for IP/headers
+		// Debug route
 		add_action( 'rest_api_init', array( $this, 'register_debug_routes' ) );
 
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
@@ -41,15 +42,18 @@ class OS_REST_Monitor {
 		add_action( 'admin_post_ordersentinel_repair_trunc_ips',  array( $this, 'handle_repair_truncated_ips' ) );
 	}
 
+	/* ---------- Options ---------- */
 	private function get_options() {
 		$defaults = array(
 			'rest_monitor_enable' => 1,
 			'rest_threshold_hour' => 200,
 			'rest_retention_days' => 7,
-			'rest_trust_proxies'  => 1, // you run behind Cloudflare
+			'rest_trust_proxies'  => 1,
 			'rate_rest_per_min'   => 300,
 			'rate_search_per_min' => 60,
 			'bot_dns_verify'      => 0,
+			'allowlist'           => "", // lines
+			'hide_allow_recent'   => 0,
 		);
 		$o = get_option( $this->opt_key, array() );
 		foreach ( $defaults as $k => $v ) { if ( ! isset( $o[ $k ] ) ) { $o[ $k ] = $v; } }
@@ -59,7 +63,103 @@ class OS_REST_Monitor {
 		$o = get_option( $this->opt_key, array() );
 		update_option( $this->opt_key, array_merge( $o, $new ) );
 	}
+	private function compile_allowlist() {
+		if ( is_array( $this->allow ) ) { return $this->allow; }
+		$opts = $this->get_options();
+		$lines = preg_split( '/\r?\n/', (string) $opts['allowlist'] );
+		$rules = array( 'ip'=>array(), 'cidr'=>array(), 'v6pfx'=>array(), 'ua'=>array() );
 
+		foreach ( $lines as $line ) {
+			$line = trim( $line );
+			if ( $line === '' || $line[0] === '#' ) { continue; }
+
+			if ( stripos( $line, 'ua:' ) === 0 ) {
+				$ua = trim( substr( $line, 3 ) );
+				if ( $ua !== '' ) { $rules['ua'][] = strtolower( $ua ); }
+				continue;
+			}
+
+			// CIDR (IPv4/IPv6)
+			if ( strpos( $line, '/' ) !== false ) {
+				list( $net, $mask ) = array_map( 'trim', explode( '/', $line, 2 ) );
+				$mask = (int) $mask;
+				if ( filter_var( $net, FILTER_VALIDATE_IP ) && $mask >= 0 ) {
+					$ver = (strpos( $net, ':' ) !== false) ? 6 : 4;
+					$rules['cidr'][] = array(
+						'ver' => $ver,
+						'net' => $this->inet_pton_s( $net ),
+						'len' => $mask,
+					);
+				}
+				continue;
+			}
+
+			// IPv6 prefix shorthand (e.g., "2606:4700:")
+			if ( strpos( $line, ':' ) !== false && substr( $line, -1 ) === ':' ) {
+				$rules['v6pfx'][] = strtolower( $line );
+				continue;
+			}
+
+			// Exact IP
+			if ( filter_var( $line, FILTER_VALIDATE_IP ) ) {
+				$rules['ip'][] = $line;
+			}
+		}
+
+		$this->allow = $rules;
+		return $this->allow;
+	}
+	private function is_allowlisted( $ip, $ip_v4, $ua = '' ) {
+		$r = $this->compile_allowlist();
+		$ua_l = strtolower( (string) $ua );
+
+		// UA rules (only affects Recent table; counts lack UA context but we still check when available)
+		foreach ( $r['ua'] as $needle ) {
+			if ( $needle !== '' && strpos( $ua_l, $needle ) !== false ) { return true; }
+		}
+
+		// Exact IPs
+		if ( $ip && in_array( $ip, $r['ip'], true ) ) { return true; }
+		if ( $ip_v4 && in_array( $ip_v4, $r['ip'], true ) ) { return true; }
+
+		// IPv6 prefixes
+		if ( $ip && strpos( $ip, ':' ) !== false ) {
+			$ip_l = strtolower( $ip );
+			foreach ( $r['v6pfx'] as $pfx ) {
+				if ( $pfx !== '' && strpos( $ip_l, $pfx ) === 0 ) { return true; }
+			}
+		}
+
+		// CIDRs
+		foreach ( $r['cidr'] as $c ) {
+			if ( $c['ver'] === 4 && $ip_v4 && $this->ip_in_cidr( $ip_v4, $c['net'], $c['len'], 4 ) ) { return true; }
+			if ( $c['ver'] === 6 && $ip && strpos( $ip, ':' ) !== false && $this->ip_in_cidr( $ip, $c['net'], $c['len'], 6 ) ) { return true; }
+		}
+
+		return false;
+	}
+	private function inet_pton_s( $ip ) { $bin = @inet_pton( $ip ); return $bin === false ? '' : $bin; }
+	private function ip_in_cidr( $ip, $net_bin, $masklen, $ver ) {
+		$ip_bin = $this->inet_pton_s( $ip );
+		if ( $ip_bin === '' || $net_bin === '' ) { return false; }
+		$bytes = ( $ver === 4 ) ? 4 : 16;
+		$masklen = max( 0, min( $bytes * 8, (int) $masklen ) );
+		if ( strlen( $ip_bin ) !== $bytes || strlen( $net_bin ) !== $bytes ) { return false; }
+
+		// Compare masked bytes
+		$full = intdiv( $masklen, 8 );
+		$rem  = $masklen % 8;
+		for ( $i = 0; $i < $full; $i++ ) {
+			if ( $ip_bin[$i] !== $net_bin[$i] ) { return false; }
+		}
+		if ( $rem ) {
+			$mask = chr( 0xFF << (8 - $rem) & 0xFF );
+			if ( ($ip_bin[$full] & $mask) !== ($net_bin[$full] & $mask) ) { return false; }
+		}
+		return true;
+	}
+
+	/* ---------- Schema & retention ---------- */
 	public function maybe_migrate() {
 		global $wpdb;
 		$charset = $wpdb->get_charset_collate();
@@ -111,6 +211,7 @@ class OS_REST_Monitor {
 		return ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $this->tbl ) ) === $this->tbl );
 	}
 
+	/* ---------- Rate limiting ---------- */
 	private function rate_key( $scope, $ip ) { return 'osrl:' . $scope . ':' . $ip . ':' . gmdate( 'YmdHi' ); }
 	private function bump_and_check( $scope, $ip, $limit, $ttl = 70 ) {
 		if ( $limit <= 0 ) { return array( 0, false ); }
@@ -129,6 +230,7 @@ class OS_REST_Monitor {
 		return array( (int) $val, ( $val > $limit ) );
 	}
 
+	/* ---------- REST hooks ---------- */
 	public function rest_before( $response, $handler, $request ) {
 		$opts = $this->get_options();
 		if ( empty( $opts['rest_monitor_enable'] ) ) { return $response; }
@@ -191,6 +293,7 @@ class OS_REST_Monitor {
 		return $response;
 	}
 
+	/* ---------- Search hook ---------- */
 	public function maybe_log_and_limit_search() {
 		if ( ! is_search() ) { return; }
 		$opts = $this->get_options();
@@ -229,6 +332,7 @@ class OS_REST_Monitor {
 		), array( '%s','%s','%d','%s','%s','%s','%d','%d','%s','%s','%d','%s' ) );
 	}
 
+	/* ---------- Legacy WC API marker ---------- */
 	public function mark_legacy_wc_api( $endpoint ) {
 		if ( ! $this->ensure_table_exists() ) { return; }
 		$ipmeta = $this->choose_client_ip( null, ! empty( $this->get_options()['rest_trust_proxies'] ) );
@@ -250,7 +354,7 @@ class OS_REST_Monitor {
 		), array( '%s','%s','%d','%s','%s','%s','%d','%d','%s','%s','%d','%s' ) );
 	}
 
-	/* ------------ NEW: Debug routes ------------ */
+	/* ---------- Debug routes ---------- */
 	public function register_debug_routes() {
 		register_rest_route(
 			'ordersentinel/v1',
@@ -266,6 +370,7 @@ class OS_REST_Monitor {
 		$opts  = $this->get_options();
 		$trust = ! empty( $opts['rest_trust_proxies'] );
 		$ipm   = $this->choose_client_ip( $r, $trust );
+		$match = $this->is_allowlisted( $ipm['ip'], $ipm['ip4'], $r->get_header( 'user-agent' ) );
 
 		return rest_ensure_response( array(
 			'trust_proxies' => (bool) $trust,
@@ -273,6 +378,7 @@ class OS_REST_Monitor {
 			'ip_ver'        => (int) $ipm['ver'],
 			'ip_v4'         => $ipm['ip4'],
 			'source'        => $ipm['src'], // ra, cf, tci, xff
+			'allowlisted'   => $match ? 1 : 0,
 			'ua'            => $this->truncate( $r->get_header( 'user-agent' ), 190 ),
 			'headers'       => array(
 				'cf-connecting-ip' => $this->header( $r, 'cf-connecting-ip' ),
@@ -283,7 +389,7 @@ class OS_REST_Monitor {
 		) );
 	}
 
-	/* ------------ IP helpers ------------ */
+	/* ---------- IP helpers ---------- */
 	private function choose_client_ip( $request = null, $trust_proxies = false ) {
 		$src = 'ra';
 		$ip  = $this->server_or_header( $request, 'REMOTE_ADDR', '' );
@@ -330,7 +436,7 @@ class OS_REST_Monitor {
 	}
 	private function truncate( $s, $n ) { $s = (string) $s; return ( strlen( $s ) > $n ) ? substr( $s, 0, $n ) : $s; }
 
-	/* ------------ Bot verification ------------ */
+	/* ---------- Bot verification ---------- */
 	private function is_verified_search_bot( $ip, $ua, $verify_dns = false ) {
 		if ( ! $ua ) { return false; }
 		$ua_l = strtolower( $ua );
@@ -367,7 +473,7 @@ class OS_REST_Monitor {
 		set_transient( $cache_key, '0', DAY_IN_SECONDS ); return false;
 	}
 
-	/* ------------ Admin UI ------------ */
+	/* ---------- Admin UI ---------- */
 	public function admin_menu() {
 		$page_parent = class_exists( 'WooCommerce' ) ? 'woocommerce' : 'tools.php';
 		add_submenu_page(
@@ -391,6 +497,25 @@ class OS_REST_Monitor {
 		printf( '<a href="%s" class="nav-tab %s">Tools</a>',     esc_url( admin_url( 'admin.php?page=ordersentinel-rest&tab=tools' ) ),     $tab === 'tools'     ? 'nav-tab-active' : '' );
 		echo '</h2>';
 
+		// Save handler (simple)
+		if ( 'POST' === $_SERVER['REQUEST_METHOD'] && isset( $_POST['_wpnonce'] ) && wp_verify_nonce( $_POST['_wpnonce'], 'ordersentinel_rest_save' ) ) {
+			$new = array(
+				'rest_monitor_enable' => empty( $_POST['rest_monitor_enable'] ) ? 0 : 1,
+				'rest_threshold_hour' => max( 10, intval( $_POST['rest_threshold_hour'] ?? 200 ) ),
+				'rest_retention_days' => max( 1, intval( $_POST['rest_retention_days'] ?? 7 ) ),
+				'rest_trust_proxies'  => empty( $_POST['rest_trust_proxies'] ) ? 0 : 1,
+				'rate_rest_per_min'   => max( 10, intval( $_POST['rate_rest_per_min'] ?? 300 ) ),
+				'rate_search_per_min' => max( 10, intval( $_POST['rate_search_per_min'] ?? 60 ) ),
+				'bot_dns_verify'      => empty( $_POST['bot_dns_verify'] ) ? 0 : 1,
+				'allowlist'           => (string) ( $_POST['allowlist'] ?? '' ),
+				'hide_allow_recent'   => empty( $_POST['hide_allow_recent'] ) ? 0 : 1,
+			);
+			$this->update_options( $new );
+			$this->allow = null; // recompile
+			echo '<div class="notice notice-success is-dismissible"><p>Settings saved.</p></div>';
+			$opts = $this->get_options();
+		}
+
 		if ( 'settings' === $tab ) {
 			echo '<form method="post">';
 			wp_nonce_field( 'ordersentinel_rest_save' );
@@ -402,11 +527,22 @@ class OS_REST_Monitor {
 			echo '<tr><th>Rate limit (REST/min)</th><td><input type="number" name="rate_rest_per_min" min="10" max="100000" value="' . intval( $opts['rate_rest_per_min'] ) . '" /></td></tr>';
 			echo '<tr><th>Rate limit (search/min)</th><td><input type="number" name="rate_search_per_min" min="10" max="100000" value="' . intval( $opts['rate_search_per_min'] ) . '" /></td></tr>';
 			echo '<tr><th>Verify search engines via DNS</th><td><label><input type="checkbox" name="bot_dns_verify" value="1" ' . checked( 1, ! empty( $opts['bot_dns_verify'] ), false ) . ' /> Verify Googlebot/Bingbot via reverse + forward DNS</label></td></tr>';
+
+			// Allowlist UI
+			echo '<tr><th>Allowlist (one per line)</th><td>';
+			echo '<textarea name="allowlist" rows="7" cols="60" placeholder="' . esc_attr( "Examples:\n68.178.221.212\n68.178.128.0/17\n2606:4700::/32\n2606:4700:\nua: Jetpack" ) . '">';
+			echo esc_textarea( (string) $opts['allowlist'] );
+			echo '</textarea>';
+			echo '<p class="description">Supported: exact IP, IPv4/IPv6 CIDR, IPv6 prefix shortcut (ends with <code>:</code>), and user-agent rules (<code>ua: substring</code>). Allowlisted IPs are hidden from Top cards (still logged & exported). UA rules affect only the Recent table.</p>';
+			echo '</td></tr>';
+
+			echo '<tr><th>Hide allowlisted in “Recent 25”</th><td><label><input type="checkbox" name="hide_allow_recent" value="1" ' . checked( 1, ! empty( $opts['hide_allow_recent'] ), false ) . ' /> Don’t show allowlisted rows in Recent table</label></td></tr>';
+
 			echo '</tbody></table>';
 			submit_button( 'Save settings' );
 			echo '</form>';
 
-			echo '<div class="notice notice-info" style="margin-top:16px;"><p><strong>Help:</strong> <em>Trust proxies</em> reads CF-Connecting-IP / True-Client-IP / X-Forwarded-For so you see the real client IP (recommended behind Cloudflare). <em>Rate limits</em> are per-IP per-minute; exceeding returns HTTP 429. <em>Verify search engines</em> confirms Googlebot/Bingbot via DNS and exempts verified bots from rate limits.</p></div>';
+			echo '<div class="notice notice-info" style="margin-top:16px;"><p><strong>Help:</strong> <em>Trust proxies</em> reads CF-Connecting-IP / True-Client-IP / X-Forwarded-For so you see the real client IP (recommended behind Cloudflare). <em>Rate limits</em> are per-IP per-minute; exceeding returns HTTP 429. <em>Verify search engines</em> confirms Googlebot/Bingbot via DNS and exempts verified bots. <em>Allowlist</em> hides noise from Top counters to spotlight attackers.</p></div>';
 
 			echo '<hr /><form method="post" action="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_purge_rest' ) ) . '">';
 			wp_nonce_field( 'ordersentinel_purge_rest' );
@@ -447,6 +583,7 @@ class OS_REST_Monitor {
 			return;
 		}
 
+		// Dashboard
 		$probe = $this->probe_rest();
 		echo '<h2>REST status</h2>';
 		printf(
@@ -455,7 +592,7 @@ class OS_REST_Monitor {
 			$probe['msg'] ? ' — ' . esc_html( $probe['msg'] ) : ''
 		);
 
-		list( $topIps24, $topRoutes, $topV4s, $suspicious, $topIps10m ) = $this->summaries();
+		list( $topIps24, $topRoutes, $topV4s, $suspicious, $topIps10m ) = $this->summaries_allowfiltered();
 		echo '<div class="metabox-holder" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;">';
 		$this->render_counts_card( 'Top IPs (24h)', $topIps24, 'ip' );
 		$this->render_counts_card( 'Top IPs (10m)', $topIps10m, 'ip' );
@@ -464,8 +601,7 @@ class OS_REST_Monitor {
 		$this->render_counts_card( 'Suspicious IPs (last hr)', $suspicious, 'ip', true );
 		echo '</div>';
 
-		// NEW: Recent 25
-		$recent = $this->recent_rows( 25 );
+		$recent = $this->recent_rows( 25, ! empty( $opts['hide_allow_recent'] ) );
 		echo '<div class="postbox" style="margin-top:12px;"><h2 class="hndle" style="padding:8px 12px;">Recent requests (last 25)</h2><div class="inside">';
 		echo '<table class="widefat striped"><thead><tr><th>ts</th><th>ip</th><th>ip_v4</th><th>method</th><th>route</th><th>status</th><th>ua</th></tr></thead><tbody>';
 		if ( empty( $recent ) ) { echo '<tr><td colspan="7"><em>None</em></td></tr>'; }
@@ -487,6 +623,7 @@ class OS_REST_Monitor {
 		echo '</div>';
 	}
 
+	/* ---------- Dashboard helpers ---------- */
 	private function probe_rest() {
 		$resp = wp_remote_get( home_url( '/wp-json/' ), array( 'timeout' => 8 ) );
 		if ( is_wp_error( $resp ) ) { return array( 'code' => 0, 'msg' => $resp->get_error_message() ); }
@@ -500,66 +637,113 @@ class OS_REST_Monitor {
 		return array( 'code' => $code, 'msg' => $msg );
 	}
 
-	private function summaries() {
+	private function summaries_allowfiltered() {
 		global $wpdb;
 		$now    = time();
 		$cut24  = gmdate( 'Y-m-d H:i:s', $now - DAY_IN_SECONDS );
 		$cut10m = gmdate( 'Y-m-d H:i:s', $now - 600 );
+		$cut1h  = gmdate( 'Y-m-d H:i:s', $now - HOUR_IN_SECONDS );
 
-		$rows1 = $wpdb->get_results( $wpdb->prepare(
-			"SELECT CASE WHEN ip REGEXP '^[0-9]{1,4}$' AND ip_v4 <> '' THEN ip_v4 ELSE ip END AS label, COUNT(*) c
-			 FROM {$this->tbl} WHERE ts >= %s
-			 GROUP BY label ORDER BY c DESC LIMIT 20",
+		// Get raw rows (bounded) then aggregate in PHP so we can apply allowlist on IPs.
+		$rows24 = (array) $wpdb->get_results( $wpdb->prepare(
+			"SELECT ip, ip_v4, route FROM {$this->tbl} WHERE ts >= %s ORDER BY id DESC LIMIT 20000",
 			$cut24
-		) );
-		$rows2 = $wpdb->get_results( $wpdb->prepare(
-			"SELECT route, COUNT(*) c FROM {$this->tbl} WHERE ts >= %s GROUP BY route ORDER BY c DESC LIMIT 20",
-			$cut24
-		) );
-		$rows4 = $wpdb->get_results( $wpdb->prepare(
-			"SELECT ip_v4, COUNT(*) c FROM {$this->tbl} WHERE ts >= %s AND ip_v4 <> '' GROUP BY ip_v4 ORDER BY c DESC LIMIT 20",
-			$cut24
-		) );
-
-		$opts  = $this->get_options();
-		$cut1h = gmdate( 'Y-m-d H:i:s', $now - HOUR_IN_SECONDS );
-		$th    = max( 10, intval( $opts['rest_threshold_hour'] ) );
-		$rows3 = $wpdb->get_results( $wpdb->prepare(
-			"SELECT CASE WHEN ip REGEXP '^[0-9]{1,4}$' AND ip_v4 <> '' THEN ip_v4 ELSE ip END AS label, COUNT(*) c
-			 FROM {$this->tbl} WHERE ts >= %s
-			 GROUP BY label HAVING c >= %d ORDER BY c DESC LIMIT 50",
-			$cut1h, $th
-		) );
-
-		$rows5 = $wpdb->get_results( $wpdb->prepare(
-			"SELECT CASE WHEN ip REGEXP '^[0-9]{1,4}$' AND ip_v4 <> '' THEN ip_v4 ELSE ip END AS label, COUNT(*) c
-			 FROM {$this->tbl} WHERE ts >= %s
-			 GROUP BY label ORDER BY c DESC LIMIT 20",
+		), ARRAY_A );
+		$rows10 = (array) $wpdb->get_results( $wpdb->prepare(
+			"SELECT ip, ip_v4 FROM {$this->tbl} WHERE ts >= %s ORDER BY id DESC LIMIT 5000",
 			$cut10m
-		) );
+		), ARRAY_A );
+		$rows1h = (array) $wpdb->get_results( $wpdb->prepare(
+			"SELECT ip, ip_v4 FROM {$this->tbl} WHERE ts >= %s ORDER BY id DESC LIMIT 10000",
+			$cut1h
+		), ARRAY_A );
 
-		$topIps24 = array();   foreach ( (array) $rows1 as $r ) { $topIps24[ $r->label ]   = (int) $r->c; }
-		$topRoutes = array();  foreach ( (array) $rows2 as $r ) { $topRoutes[ $r->route ]  = (int) $r->c; }
-		$topV4s = array();     foreach ( (array) $rows4 as $r ) { $topV4s[ $r->ip_v4 ]     = (int) $r->c; }
-		$suspicious = array(); foreach ( (array) $rows3 as $r ) { $suspicious[ $r->label ] = (int) $r->c; }
-		$topIps10m = array();  foreach ( (array) $rows5 as $r ) { $topIps10m[ $r->label ]  = (int) $r->c; }
+		$opts = $this->get_options();
+		$th   = max( 10, intval( $opts['rest_threshold_hour'] ) );
+
+		$topIps24 = array();
+		$topRoutes = array();
+		$topV4s = array();
+		$topIps10m = array();
+		$suspicious = array();
+
+		foreach ( $rows24 as $r ) {
+			$ip   = $r['ip'];
+			$ip_v4= $r['ip_v4'];
+			if ( $this->is_allowlisted( $ip, $ip_v4, '' ) ) { /* skip */ }
+			else {
+				$label = ( preg_match( '/^[0-9]{1,4}$/', $ip ) && $ip_v4 ) ? $ip_v4 : $ip;
+				if ( $label ) { $topIps24[ $label ] = 1 + ( $topIps24[ $label ] ?? 0 ); }
+			}
+			if ( ! empty( $r['route'] ) ) {
+				$rt = $r['route'];
+				$topRoutes[ $rt ] = 1 + ( $topRoutes[ $rt ] ?? 0 );
+			}
+			if ( $ip_v4 ) { $topV4s[ $r['ip_v4'] ] = 1 + ( $topV4s[ $r['ip_v4'] ] ?? 0 ); }
+		}
+		foreach ( $rows10 as $r ) {
+			$ip = $r['ip']; $ip_v4 = $r['ip_v4'];
+			if ( $this->is_allowlisted( $ip, $ip_v4, '' ) ) { continue; }
+			$label = ( preg_match( '/^[0-9]{1,4}$/', $ip ) && $ip_v4 ) ? $ip_v4 : $ip;
+			if ( $label ) { $topIps10m[ $label ] = 1 + ( $topIps10m[ $label ] ?? 0 ); }
+		}
+		foreach ( $rows1h as $r ) {
+			$ip = $r['ip']; $ip_v4 = $r['ip_v4'];
+			if ( $this->is_allowlisted( $ip, $ip_v4, '' ) ) { continue; }
+			$label = ( preg_match( '/^[0-9]{1,4}$/', $ip ) && $ip_v4 ) ? $ip_v4 : $ip;
+			if ( $label ) { $suspicious[ $label ] = 1 + ( $suspicious[ $label ] ?? 0 ); }
+		}
+		// Apply threshold to suspicious
+		foreach ( array_keys( $suspicious ) as $k ) {
+			if ( $suspicious[ $k ] < $th ) { unset( $suspicious[ $k ] ); }
+		}
+
+		// Sort & trim
+		arsort( $topIps24 );  $topIps24  = array_slice( $topIps24, 0, 20, true );
+		arsort( $topRoutes ); $topRoutes = array_slice( $topRoutes, 0, 20, true );
+		arsort( $topV4s );    $topV4s    = array_slice( $topV4s, 0, 20, true );
+		arsort( $topIps10m ); $topIps10m = array_slice( $topIps10m, 0, 20, true );
+		arsort( $suspicious );$suspicious= array_slice( $suspicious, 0, 50, true );
 
 		return array( $topIps24, $topRoutes, $topV4s, $suspicious, $topIps10m );
 	}
-	private function recent_rows( $limit = 25 ) {
-		global $wpdb;
-		$limit = max(1, min(200, intval($limit)));
-		return (array) $wpdb->get_results( "SELECT ts, ip, ip_v4, method, route, status, ua FROM {$this->tbl} ORDER BY id DESC LIMIT {$limit}", ARRAY_A );
-	}
-	private function render_counts_card( $title, $counts, $label, $highlight = false ) {
-		echo '<div class="postbox"><h2 class="hndle" style="padding:8px 12px;">' . esc_html( $title ) . '</h2><div class="inside"><table class="widefat striped"><thead><tr><th>' . esc_html( ucfirst( $label ) ) . '</th><th>Count</th></tr></thead><tbody>';
-		if ( empty( $counts ) ) { echo '<tr><td colspan="2"><em>None</em></td></tr>'; }
-		foreach ( $counts as $k => $v ) {
-			printf( '<tr><td>%s</td><td%s>%d</td></tr>', esc_html( $k ), $highlight ? ' style="color:#c00;font-weight:600;"' : '', intval( $v ) );
+    
+    private function render_counts_card( $title, $assoc, $key_label = 'key', $emphasize = false ) {
+	echo '<div class="postbox"><h2 class="hndle" style="padding:8px 12px;">' . esc_html( $title ) . '</h2><div class="inside">';
+	echo '<table class="widefat striped"><thead><tr>';
+	$label_title = $key_label === 'ip' ? 'Ip' : ( $key_label === 'ip_v4' ? 'Ip_v4' : ucfirst( $key_label ) );
+	echo '<th>' . esc_html( $label_title ) . '</th><th style="width:90px;text-align:right;">Count</th>';
+	echo '</tr></thead><tbody>';
+
+	if ( empty( $assoc ) || ! is_array( $assoc ) ) {
+		echo '<tr><td colspan="2"><em>None</em></td></tr>';
+	} else {
+		foreach ( $assoc as $k => $count ) {
+			$k_disp = ( $key_label === 'route' ) ? '<code>' . esc_html( (string) $k ) . '</code>' : esc_html( (string) $k );
+			$cnt    = (int) $count;
+			$style  = $emphasize ? ' style="font-weight:600;"' : '';
+			echo '<tr><td>' . $k_disp . '</td><td style="text-align:right;"' . $style . '>' . $cnt . '</td></tr>';
 		}
-		echo '</tbody></table></div></div>';
 	}
 
+	echo '</tbody></table></div></div>';
+}
+
+
+	private function recent_rows( $limit = 25, $hide_allow = false ) {
+		global $wpdb;
+		$limit = max(1, min(200, intval($limit)));
+		$rows = (array) $wpdb->get_results( "SELECT ts, ip, ip_v4, method, route, status, ua FROM {$this->tbl} ORDER BY id DESC LIMIT {$limit}", ARRAY_A );
+		if ( ! $hide_allow ) { return $rows; }
+		$out = array();
+		foreach ( $rows as $r ) {
+			if ( $this->is_allowlisted( $r['ip'], $r['ip_v4'], $r['ua'] ) ) { continue; }
+			$out[] = $r;
+		}
+		return $out;
+	}
+
+	/* ---------- Maintenance & exports ---------- */
 	public function handle_purge_rest() {
 		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'ordersentinel_purge_rest' ) ) { wp_die( 'Not allowed' ); }
 		$this->maybe_migrate();
