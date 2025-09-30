@@ -1,0 +1,39 @@
+<?php
+defined('ABSPATH') || exit;
+
+class OS_REST_Monitor {
+
+    public static function init() {
+        // Admin menu
+        add_action( 'admin_menu', [ __CLASS__, 'admin_menu' ] );
+
+        // Optional: prove we’re loaded
+        // add_action( 'admin_notices', [ __CLASS__, 'debug_notice' ] );
+    }
+
+    public static function admin_menu() {
+        $cb = [ __CLASS__, 'render_page' ];
+        $title = 'REST Monitor';
+
+        if ( class_exists( 'WooCommerce' ) ) {
+            $cap = current_user_can( 'manage_woocommerce' ) ? 'manage_woocommerce' : 'manage_options';
+            add_submenu_page(
+                'woocommerce',
+                $title,
+                $title,
+                $cap,
+                'ordersentinel-rest',
+                $cb
+            );
+            return;
+        }
+
+        // Fallback: Tools → REST Monitor
+        add_management_page(
+            $title,
+            $title,
+            'manage_options',
+            'ordersentinel-rest',
+            $cb
+        );
+    }

@@ -1,68 +1,45 @@
-#!/usr/bin/env python3
-"""
-Build a WordPress-friendly plugin ZIP with forward-slash paths and print a manifest
-of the ZIP contents so you don't need 'unzip -l'.
+import os, re, zipfile
+from pathlib import Path
 
-Usage (from repo root):
-  py scripts/build-plugin-zip.py
-  py scripts/build-plugin-zip.py order-sentinel 0.2.2
-"""
+SLUG = "order-sentinel"
+repo = Path(__file__).resolve().parents[1]
+src  = repo / SLUG
+dist = repo / "dist"
+dist.mkdir(exist_ok=True)
 
-import os, sys, re, zipfile, time
+# Read version
+version = "0.0.0"
+main_php = src / f"{SLUG}.php"
+if main_php.exists():
+    m = re.search(r"^\s*\*\s*Version:\s*([0-9]+\.[0-9]+\.[0-9]+)", main_php.read_text(encoding="utf-8"), re.M)
+    if m:
+        version = m.group(1)
 
-def derive_version(main_php_path: str) -> str:
-    version = "0.1.0"
-    try:
-        with open(main_php_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                m = re.match(r'^\s*\*\s*Version:\s*([0-9A-Za-z.\-]+)\s*$', line)
-                if m:
-                    return m.group(1)
-    except Exception:
-        pass
-    return version
+zip_path = dist / f"OrderSentinel-{version}.zip"
+if zip_path.exists():
+    zip_path.unlink()
 
-def main() -> None:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    plugin_dir = sys.argv[1] if len(sys.argv) > 1 else "order-sentinel"
-    plugin_path = os.path.join(root, plugin_dir)
+EXCLUDE_DIRS = {".git", "__pycache__", "node_modules", "vendor", "tests", "test", "tmp", "build"}
+EXCLUDE_BASENAMES = {".DS_Store", "Thumbs.db"}
+EXCLUDE_SUFFIXES = (".bak", ".orig", ".tmp", ".psd", ".ai")
 
-    if not os.path.isdir(plugin_path):
-        print(f"ERROR: Plugin dir not found: {plugin_path}")
-        sys.exit(1)
+def skip_rel(rel: str) -> bool:
+    rel = rel.replace("\\", "/")
+    if rel.startswith("mu-plugins/") or "/mu-plugins/" in rel:
+        return True
+    base = rel.rsplit("/", 1)[-1]
+    if base in EXCLUDE_BASENAMES or base.endswith(EXCLUDE_SUFFIXES):
+        return True
+    return False
 
-    main_php = os.path.join(plugin_path, "order-sentinel.php")
-    if not os.path.isfile(main_php):
-        print(f"ERROR: {plugin_dir}/order-sentinel.php missing.")
-        sys.exit(1)
-
-    version = sys.argv[2] if len(sys.argv) > 2 else derive_version(main_php)
-
-    dist_dir = os.path.join(root, "dist")
-    os.makedirs(dist_dir, exist_ok=True)
-    zip_path = os.path.join(dist_dir, f"OrderSentinel-{version}.zip")
-
-    slug = os.path.basename(plugin_path.rstrip("/\\"))
-    entries = []
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for folder, _subdirs, files in os.walk(plugin_path):
-            rel_folder = os.path.relpath(folder, plugin_path)
-            parts = [] if rel_folder in (".", "") else rel_folder.split(os.sep)
-            if any(p in (".git", "node_modules", "vendor") for p in parts):
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        rel_root = Path(root).relative_to(src)
+        for f in files:
+            rel_file = (rel_root / f).as_posix()
+            if skip_rel(rel_file):
                 continue
-            for name in files:
-                if name in ("Thumbs.db", ".DS_Store"):
-                    continue
-                abs_path = os.path.join(folder, name)
-                rel = os.path.relpath(abs_path, plugin_path).replace(os.sep, "/")
-                arcname = f"{slug}/{rel}"
-                zf.write(abs_path, arcname)
-                entries.append(arcname)
+            z.write(Path(root) / f, arcname=f"{SLUG}/{rel_file}")
 
-    print(f"Created: {zip_path}")
-    print("ZIP manifest:")
-    for e in entries:
-        print(" -", e)
-
-if __name__ == "__main__":
-    main()
+print(f"Created: {zip_path}")

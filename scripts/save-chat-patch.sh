@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
+                                    OK,LKLOI7UFVYTGH CVB #0!/usr/bin/env bash
+                                    "M NB"
 set -euo pipefail
 root="$(pwd)"
 tmp="$(mktemp)"
