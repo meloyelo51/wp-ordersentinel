@@ -3,7 +3,7 @@
  * Plugin Name: (MU) OrderSentinel — REST Monitor
  * Description: REST + search logger for OrderSentinel. IPv4-friendly, optional bot verification, light rate-limits. Tools include Backup & Purge and Repair truncated IPs. Creates table early to avoid races.
  * Author: Matt's Basement Arcade
- * Version: 0.3.10-mu9
+ * Version: 0.3.11-mu10
  */
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
@@ -31,6 +31,9 @@ class OS_REST_Monitor {
 		add_action( 'template_redirect', array( $this, 'maybe_log_and_limit_search' ), 1 );
 		add_action( 'woocommerce_api_request', array( $this, 'mark_legacy_wc_api' ), 10, 1 );
 
+		// NEW: debug routes for IP/headers
+		add_action( 'rest_api_init', array( $this, 'register_debug_routes' ) );
+
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
 		add_action( 'admin_post_ordersentinel_purge_rest',        array( $this, 'handle_purge_rest' ) );
 		add_action( 'admin_post_ordersentinel_export_rest_csv',   array( $this, 'handle_export_csv' ) );
@@ -43,7 +46,7 @@ class OS_REST_Monitor {
 			'rest_monitor_enable' => 1,
 			'rest_threshold_hour' => 200,
 			'rest_retention_days' => 7,
-			'rest_trust_proxies'  => 0,
+			'rest_trust_proxies'  => 1, // you run behind Cloudflare
 			'rate_rest_per_min'   => 300,
 			'rate_search_per_min' => 60,
 			'bot_dns_verify'      => 0,
@@ -247,6 +250,39 @@ class OS_REST_Monitor {
 		), array( '%s','%s','%d','%s','%s','%s','%d','%d','%s','%s','%d','%s' ) );
 	}
 
+	/* ------------ NEW: Debug routes ------------ */
+	public function register_debug_routes() {
+		register_rest_route(
+			'ordersentinel/v1',
+			'/ping',
+			array(
+				'methods'  => 'GET',
+				'callback' => array( $this, 'rest_ping' ),
+				'permission_callback' => '__return_true',
+			)
+		);
+	}
+	public function rest_ping( WP_REST_Request $r ) {
+		$opts  = $this->get_options();
+		$trust = ! empty( $opts['rest_trust_proxies'] );
+		$ipm   = $this->choose_client_ip( $r, $trust );
+
+		return rest_ensure_response( array(
+			'trust_proxies' => (bool) $trust,
+			'ip'            => $ipm['ip'],
+			'ip_ver'        => (int) $ipm['ver'],
+			'ip_v4'         => $ipm['ip4'],
+			'source'        => $ipm['src'], // ra, cf, tci, xff
+			'ua'            => $this->truncate( $r->get_header( 'user-agent' ), 190 ),
+			'headers'       => array(
+				'cf-connecting-ip' => $this->header( $r, 'cf-connecting-ip' ),
+				'true-client-ip'   => $this->header( $r, 'true-client-ip' ),
+				'x-forwarded-for'  => $this->header( $r, 'x-forwarded-for' ),
+				'remote_addr'      => $_SERVER['REMOTE_ADDR'] ?? '',
+			),
+		) );
+	}
+
 	/* ------------ IP helpers ------------ */
 	private function choose_client_ip( $request = null, $trust_proxies = false ) {
 		$src = 'ra';
@@ -370,7 +406,7 @@ class OS_REST_Monitor {
 			submit_button( 'Save settings' );
 			echo '</form>';
 
-			echo '<div class="notice notice-info" style="margin-top:16px;"><p><strong>Help:</strong> <em>Trust proxies</em> reads CF-Connecting-IP / True-Client-IP / X-Forwarded-For so you see the real client IP. Only enable if you are behind a trusted proxy (e.g., Cloudflare). <em>Rate limits</em> are per-IP per-minute; exceeding returns HTTP 429. <em>Verify search engines</em> confirms Googlebot/Bingbot via DNS and exempts verified bots from rate limits.</p></div>';
+			echo '<div class="notice notice-info" style="margin-top:16px;"><p><strong>Help:</strong> <em>Trust proxies</em> reads CF-Connecting-IP / True-Client-IP / X-Forwarded-For so you see the real client IP (recommended behind Cloudflare). <em>Rate limits</em> are per-IP per-minute; exceeding returns HTTP 429. <em>Verify search engines</em> confirms Googlebot/Bingbot via DNS and exempts verified bots from rate limits.</p></div>';
 
 			echo '<hr /><form method="post" action="' . esc_url( admin_url( 'admin-post.php?action=ordersentinel_purge_rest' ) ) . '">';
 			wp_nonce_field( 'ordersentinel_purge_rest' );
@@ -419,13 +455,34 @@ class OS_REST_Monitor {
 			$probe['msg'] ? ' — ' . esc_html( $probe['msg'] ) : ''
 		);
 
-		list( $topIps, $topRoutes, $topV4s, $suspicious ) = $this->summaries();
+		list( $topIps24, $topRoutes, $topV4s, $suspicious, $topIps10m ) = $this->summaries();
 		echo '<div class="metabox-holder" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;">';
-		$this->render_counts_card( 'Top IPs (24h)', $topIps, 'ip' );
+		$this->render_counts_card( 'Top IPs (24h)', $topIps24, 'ip' );
+		$this->render_counts_card( 'Top IPs (10m)', $topIps10m, 'ip' );
 		$this->render_counts_card( 'Top IPv4s (24h)', $topV4s, 'ip_v4' );
 		$this->render_counts_card( 'Top Routes (24h)', $topRoutes, 'route' );
 		$this->render_counts_card( 'Suspicious IPs (last hr)', $suspicious, 'ip', true );
 		echo '</div>';
+
+		// NEW: Recent 25
+		$recent = $this->recent_rows( 25 );
+		echo '<div class="postbox" style="margin-top:12px;"><h2 class="hndle" style="padding:8px 12px;">Recent requests (last 25)</h2><div class="inside">';
+		echo '<table class="widefat striped"><thead><tr><th>ts</th><th>ip</th><th>ip_v4</th><th>method</th><th>route</th><th>status</th><th>ua</th></tr></thead><tbody>';
+		if ( empty( $recent ) ) { echo '<tr><td colspan="7"><em>None</em></td></tr>'; }
+		foreach ( $recent as $r ) {
+			printf(
+				'<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td><td>%d</td><td><span title="%s">%s</span></td></tr>',
+				esc_html( $r['ts'] ),
+				esc_html( $r['ip'] ),
+				esc_html( $r['ip_v4'] ),
+				esc_html( $r['method'] ),
+				esc_html( $r['route'] ),
+				intval( $r['status'] ),
+				esc_attr( $r['ua'] ),
+				esc_html( ( strlen( $r['ua'] ) > 48 ) ? ( substr( $r['ua'], 0, 48 ) . '…' ) : $r['ua'] )
+			);
+		}
+		echo '</tbody></table></div></div>';
 
 		echo '</div>';
 	}
@@ -445,8 +502,9 @@ class OS_REST_Monitor {
 
 	private function summaries() {
 		global $wpdb;
-		$now   = time();
-		$cut24 = gmdate( 'Y-m-d H:i:s', $now - DAY_IN_SECONDS );
+		$now    = time();
+		$cut24  = gmdate( 'Y-m-d H:i:s', $now - DAY_IN_SECONDS );
+		$cut10m = gmdate( 'Y-m-d H:i:s', $now - 600 );
 
 		$rows1 = $wpdb->get_results( $wpdb->prepare(
 			"SELECT CASE WHEN ip REGEXP '^[0-9]{1,4}$' AND ip_v4 <> '' THEN ip_v4 ELSE ip END AS label, COUNT(*) c
@@ -473,11 +531,25 @@ class OS_REST_Monitor {
 			$cut1h, $th
 		) );
 
-		$topIps = array();      foreach ( (array) $rows1 as $r ) { $topIps[ $r->label ]   = (int) $r->c; }
-		$topRoutes = array();   foreach ( (array) $rows2 as $r ) { $topRoutes[ $r->route ]= (int) $r->c; }
-		$topV4s = array();      foreach ( (array) $rows4 as $r ) { $topV4s[ $r->ip_v4 ]   = (int) $r->c; }
-		$suspicious = array();  foreach ( (array) $rows3 as $r ) { $suspicious[ $r->label ] = (int) $r->c; }
-		return array( $topIps, $topRoutes, $topV4s, $suspicious );
+		$rows5 = $wpdb->get_results( $wpdb->prepare(
+			"SELECT CASE WHEN ip REGEXP '^[0-9]{1,4}$' AND ip_v4 <> '' THEN ip_v4 ELSE ip END AS label, COUNT(*) c
+			 FROM {$this->tbl} WHERE ts >= %s
+			 GROUP BY label ORDER BY c DESC LIMIT 20",
+			$cut10m
+		) );
+
+		$topIps24 = array();   foreach ( (array) $rows1 as $r ) { $topIps24[ $r->label ]   = (int) $r->c; }
+		$topRoutes = array();  foreach ( (array) $rows2 as $r ) { $topRoutes[ $r->route ]  = (int) $r->c; }
+		$topV4s = array();     foreach ( (array) $rows4 as $r ) { $topV4s[ $r->ip_v4 ]     = (int) $r->c; }
+		$suspicious = array(); foreach ( (array) $rows3 as $r ) { $suspicious[ $r->label ] = (int) $r->c; }
+		$topIps10m = array();  foreach ( (array) $rows5 as $r ) { $topIps10m[ $r->label ]  = (int) $r->c; }
+
+		return array( $topIps24, $topRoutes, $topV4s, $suspicious, $topIps10m );
+	}
+	private function recent_rows( $limit = 25 ) {
+		global $wpdb;
+		$limit = max(1, min(200, intval($limit)));
+		return (array) $wpdb->get_results( "SELECT ts, ip, ip_v4, method, route, status, ua FROM {$this->tbl} ORDER BY id DESC LIMIT {$limit}", ARRAY_A );
 	}
 	private function render_counts_card( $title, $counts, $label, $highlight = false ) {
 		echo '<div class="postbox"><h2 class="hndle" style="padding:8px 12px;">' . esc_html( $title ) . '</h2><div class="inside"><table class="widefat striped"><thead><tr><th>' . esc_html( ucfirst( $label ) ) . '</th><th>Count</th></tr></thead><tbody>';
