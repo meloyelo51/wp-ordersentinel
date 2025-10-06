@@ -5,99 +5,13 @@ if ( ! class_exists( 'OS_REST_Monitor', false ) ) :
 
 class OS_REST_Monitor {
 
-    /**
-     * Read options directly and ensure checkbox keys exist with '0'
-     */
-    private static function get_options_read() {
-        $v = get_option('ordersentinel_options');
-        if ( ! is_array($v) ) { $v = array(); }
-        foreach (array('store_json_on_order','store_json','json_on_order') as $k) {
-            if ( ! array_key_exists($k, $v) ) { $v[$k] = '0'; }
-        }
-        return $v;
-    }
-
-    /**
-     * Strict checked helper: true only when option == '1'
-     */
-    public static function is_checked( $key ) {
-        $opts = self::get_options_read();
-        return isset($opts[$key]) && (string)$opts[$key] === '1';
-    }
-
-
-    /**
-     * Ensure our option uses a sanitize callback even if registered elsewhere.
-     */
-    public static function register_setting_guard() {
-        if ( function_exists('register_setting') ) {
-            register_setting( 'ordersentinel', 'ordersentinel', array( 'sanitize_callback' => array( __CLASS__, 'sanitize_options' ) ) );
-            register_setting( 'ordersentinel_settings', 'ordersentinel_settings', array( 'sanitize_callback' => array( __CLASS__, 'sanitize_options' ) ) );
-        }
-    }
-
-
-    /**
-     * Settings API sanitize callback. Coerces boolean-ish fields to 0/1.
-     */
-    public static function sanitize_options( $v ) {
-        if ( ! is_array( $v ) ) { return $v; }
-        $keys = array( 'store_json_on_order', 'store_json', 'json_on_order' );
-        foreach ( $keys as $k ) {
-            $v[ $k ] = ( isset( $v[ $k ] ) && (string) $v[ $k ] === '1' ) ? 1 : 0;
-        }
-        return $v;
-    }
-
-    /**
-     * Sanitize & normalize plugin settings (checkboxes, etc.).
-     */
-    public static function sanitize_settings( $in ) {
-        $out = is_array( $in ) ? $in : array();
-
-        // Normalize boolean flags to '0' or '1'
-        $bools = array(
-            'store_json',
-            'trust_proxies',
-            'verify_search_dns',
-            'enforce_rate_rest',
-            'enforce_rate_search',
-            'enable_blacklist',
-            'enable_whitelist'
-        );
-        foreach ( $bools as $k ) {
-            $out[$k] = ( isset($in[$k]) && $in[$k] && $in[$k] !== '0' ) ? '1' : '0';
-        }
-
-        return $out;
-    }
-
-
-    /**
-     * Register settings with Settings API using our sanitizer.
-     */
-    public static function settings_register() {
-        if ( ! is_admin() ) return;
-        register_setting(
-            'ordersentinel',
-            'ordersentinel_settings',
-            array(
-                'type'              => 'array',
-                'sanitize_callback' => array(__CLASS__, 'sanitize_settings'),
-                'default'           => array(),
-            )
-        );
-    }
-
-
-    const VERSION = '1.0.16';
+    const VERSION = '1.0.1';
 
     /** Option key */
     const OPT = 'ordersentinel_rest_settings';
 
     /** Hook bootstrap */
     public static function init() {
-        add_action( 'admin_init', array( __CLASS__, 'register_setting_guard' ) );
         add_action( 'admin_menu', [ __CLASS__, 'admin_menu' ] );
         add_action( 'admin_init', [ __CLASS__, 'maybe_create_or_upgrade_table' ] );
 

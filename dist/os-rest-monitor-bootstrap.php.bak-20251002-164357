@@ -1,0 +1,23 @@
+<?php
+defined('ABSPATH') || exit;
+
+/**
+ * Bootstrap loader for OrderSentinel REST monitor (baked-in).
+ */
+add_action('plugins_loaded', function () {
+    $class_file   = __DIR__ . '/class-os-rest-monitor.php';
+    $capture_file = __DIR__ . '/os-rest-capture.php';
+
+    if ( file_exists( $class_file ) ) {
+        require_once $class_file;
+    }
+    if ( file_exists( $capture_file ) ) {
+        require_once $capture_file;
+    }
+    if ( class_exists('OS_REST_Monitor') && method_exists('OS_REST_Monitor','init') ) {
+        OS_REST_Monitor::init();
+    }
+}, 1);
+
+add_action('admin_menu', array('OS_REST_Monitor','admin_menu'));
+add_action('admin_init', array('OS_REST_Monitor','settings_register'));
