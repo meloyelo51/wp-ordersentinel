@@ -662,8 +662,8 @@ if ( ! get_option( 'ordersentinel_backfilled' ) && class_exists( 'WooCommerce' )
 
 	/** Per-IP report */
 	public function handle_report_ip() {
-		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_GET['_wpnonce'] ?? '', 'ordersentinel_report_ip' ) ) { wp_die( 'Not allowed' ); }
-		$order_id = absint( $_GET['order_id'] ?? 0 ); if ( ! $order_id ) { wp_die( 'No order' ); }
+		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_REQUEST['_wpnonce'] ?? '', 'ordersentinel_report_ip' ) ) { wp_die( 'Not allowed' ); }
+		$order_id = absint( $_REQUEST['order_id'] ?? 0 ); if ( ! $order_id ) { wp_die( 'No order' ); }
 		$row = $this->get_latest_row_for_order( $order_id ); if ( ! $row || empty( $row->ip ) ) { wp_die( 'No IP found' ); }
 		$res = $this->report_ip_to_abuseipdb( $order_id, $row );
 		$msg = $res['ok'] ? 'Reported to AbuseIPDB.' : 'Report failed: ' . $res['err'];
@@ -689,7 +689,7 @@ if ( ! get_option( 'ordersentinel_backfilled' ) && class_exists( 'WooCommerce' )
 	/** Reset report (per-row) */
 	public function handle_reset_report() {
 		if ( ! current_user_can( 'manage_woocommerce' ) || ! wp_verify_nonce( $_GET['_wpnonce'] ?? '', 'ordersentinel_reset_report' ) ) { wp_die( 'Not allowed' ); }
-		$order_id = absint( $_GET['order_id'] ?? 0 ); if ( ! $order_id ) { wp_die( 'No order' ); }
+		$order_id = absint( $_REQUEST['order_id'] ?? 0 ); if ( ! $order_id ) { wp_die( 'No order' ); }
 		$this->reset_report_for_order( $order_id );
 		wp_safe_redirect( add_query_arg( 'ordersentinel_msg', rawurlencode( 'Report state reset for order #' . $order_id ), admin_url( 'admin.php?page=ordersentinel' ) ) ); exit;
 	}
