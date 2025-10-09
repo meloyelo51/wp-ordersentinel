@@ -3,32 +3,20 @@ defined('ABSPATH') || exit;
 
 /**
  * Combined OrderSentinel metabox for WooCommerce orders.
- * Always registers. Hides any legacy "OrderSentinel — Research*" boxes.
+ * - Always registers (no gating).
+ * - Shows IP + X-Forwarded-For, quick OSINT links.
+ * - Two jump links (REST Monitor / Tools).
+ * - A working "Report to AbuseIPDB" form that posts to admin-post.php.
  */
 if ( ! function_exists('ordersentinel_register_combined_metabox') ) {
     function ordersentinel_register_combined_metabox() {
-        // Force-remove legacy boxes very late so we win priority order.
+        // Hide any legacy box if present
         add_action('add_meta_boxes', function() {
-            remove_meta_box('ordersentinel_research',       'shop_order', 'side');
-            remove_meta_box('ordersentinel_research',       'shop_order', 'normal');
-            remove_meta_box('ordersentinel_researchorders', 'shop_order', 'side');
-            remove_meta_box('ordersentinel_researchorders', 'shop_order', 'normal');
-
-            // Defensive removal by title match.
-            global $wp_meta_boxes;
-            if ( isset($wp_meta_boxes['shop_order']) && is_array($wp_meta_boxes['shop_order']) ) {
-                foreach (array('side','normal','advanced') as $ctx) {
-                    foreach (array('high','core','default','low') as $prio) {
-                        if (empty($wp_meta_boxes['shop_order'][$ctx][$prio])) continue;
-                        foreach ($wp_meta_boxes['shop_order'][$ctx][$prio] as $id => $box) {
-                            if ( isset($box['title']) && is_string($box['title']) && stripos($box['title'], 'OrderSentinel — Research') !== false ) {
-                                unset($wp_meta_boxes['shop_order'][$ctx][$prio][$id]);
-                            }
-                        }
-                    }
-                }
-            }
-        }, 9999);
+            remove_meta_box('ordersentinel_research',      'shop_order', 'side');
+            remove_meta_box('ordersentinel_research',      'shop_order', 'normal');
+            remove_meta_box('ordersentinel_researchorders','shop_order', 'side');
+            remove_meta_box('ordersentinel_researchorders','shop_order', 'normal');
+        }, 99);
 
         add_meta_box(
             'ordersentinel_metabox',
@@ -46,45 +34,76 @@ if ( ! function_exists('ordersentinel_register_combined_metabox') ) {
 if ( ! function_exists('ordersentinel_render_combined_metabox') ) {
     function ordersentinel_render_combined_metabox( $post ) {
         $order_id = absint($post->ID);
-        $ip       = get_post_meta($order_id, '_customer_ip_address', true);
-        $xff      = get_post_meta($order_id, '_x_forwarded_for', true);
 
-        $safe = function($v){ return esc_html((string)$v); };
-        $mk_admin = function($args){ return esc_url(add_query_arg($args, admin_url('admin.php'))); };
+        // IPs from order meta
+        $ip  = get_post_meta($order_id, '_customer_ip_address', true);
+        $xff = get_post_meta($order_id, '_x_forwarded_for', true);
+        if (!is_string($ip))  { $ip  = ''; }
+        if (!is_string($xff)) { $xff = ''; }
 
-        $rest_monitor_url = $mk_admin(array('page'=>'ordersentinel-rest','tab'=>'overview','ip'=>$ip ?: ''));
-        $tools_ip_lookup  = $mk_admin(array('page'=>'ordersentinel','tab'=>'tools','ip'=>$ip ?: ''));
+        // Basic order details for OSINT links
+        $email = get_post_meta($order_id, '_billing_email', true);
+        $phone = get_post_meta($order_id, '_billing_phone', true);
+        $name  = trim( get_post_meta($order_id, '_billing_first_name', true) . ' ' . get_post_meta($order_id, '_billing_last_name', true) );
+        $addr  = trim( implode(' ', array_filter([
+            get_post_meta($order_id, '_billing_address_1', true),
+            get_post_meta($order_id, '_billing_address_2', true),
+            get_post_meta($order_id, '_billing_city', true),
+            get_post_meta($order_id, '_billing_state', true),
+            get_post_meta($order_id, '_billing_postcode', true),
+            get_post_meta($order_id, '_billing_country', true),
+        ])));
 
-        echo '<div class="ordersentinel-box">';
-        echo '<p><strong>Order ID:</strong> '.$safe($order_id).'</p>';
-        echo '<p><strong>Customer IP:</strong> '.($ip ? $safe($ip) : '<em>unknown</em>').'</p>';
-        echo '<p><strong>X-Forwarded-For:</strong> '.($xff ? $safe($xff) : '<em>empty</em>').'</p>';
+        $esc = 'esc_html';
+        ?>
+        <div class="inside">
+            <p><strong>IP:</strong><br><?php echo $esc($ip ?: '—'); ?></p>
+            <p><strong>X-Forwarded-For:</strong><br><?php echo $esc($xff ?: 'empty'); ?></p>
 
-        echo '<p style="margin-top:8px">';
-        echo '<a class="button" href="'.$rest_monitor_url.'">Open REST Monitor</a> ';
-        echo '<a class="button" href="'.$tools_ip_lookup.'">Lookup IP</a>';
-        echo '</p>';
+            <p style="margin-top:8px">
+                <a class="button" href="<?php echo esc_url( add_query_arg( array(
+                    'page' => 'ordersentinel-rest',
+                    'tab'  => 'overview',
+                    'ip'   => $ip,
+                ), admin_url('admin.php') ) ); ?>">Open REST Monitor</a>
 
-        global $wpdb;
-        $tbl = $wpdb->prefix . 'ordersentinel_restlog';
-        $has_tbl = $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s", $tbl
-        ) );
-        if ( $has_tbl && $ip ) {
-            $rows = $wpdb->get_results( $wpdb->prepare(
-                "SELECT ts, code, meth, route FROM `$tbl` WHERE ip = %s ORDER BY ts DESC LIMIT 5", $ip
-            ) );
-            if ( $rows ) {
-                echo '<details style="margin-top:8px"><summary><strong>Latest REST hits for this IP</strong></summary>';
-                echo '<table class="widefat striped" style="margin-top:6px"><thead><tr><th>Time (UTC)</th><th>Code</th><th>Method</th><th>Route</th></tr></thead><tbody>';
-                foreach ( $rows as $r ) {
-                    echo '<tr><td>'.esc_html($r->ts).'</td><td>'.esc_html($r->code).'</td><td>'.esc_html($r->meth).'</td><td>'.esc_html($r->route).'</td></tr>';
-                }
-                echo '</tbody></table></details>';
-            }
-        }
+                <a class="button" href="<?php echo esc_url( add_query_arg( array(
+                    'page'  => 'ordersentinel',
+                    'tab'   => 'tools',
+                    'ip'    => $ip,
+                    'focus' => 'ip'
+                ), admin_url('admin.php') ) ); ?>">Lookup IP (Tools)</a>
+            </p>
 
-        echo '<p style="margin-top:8px;color:#666"><small>If you don’t see this, open “Screen Options” and enable <em>OrderSentinel</em>. The legacy “OrderSentinel — Research” panel is hidden by the plugin.</small></p>';
-        echo '</div>';
+            <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>" style="margin-top:6px">
+                <input type="hidden" name="action"   value="ordersentinel_report_ip" />
+                <input type="hidden" name="order_id" value="<?php echo esc_attr($order_id); ?>" />
+                <input type="hidden" name="ip"       value="<?php echo esc_attr($ip); ?>" />
+                <?php wp_nonce_field( 'ordersentinel_report_ip' ); ?>
+                <button type="submit" class="button button-secondary">Report to AbuseIPDB</button>
+            </form>
+
+            <hr />
+            <p><strong>Quick OSINT links</strong></p>
+            <ul style="margin-left:16px; list-style:disc;">
+                <?php if ($email): ?>
+                    <li>Email: <a href="<?php echo esc_url('https://www.google.com/search?q='.rawurlencode($email)); ?>" target="_blank" rel="noreferrer">Google "<?php echo $esc($email); ?>"</a></li>
+                <?php endif; ?>
+                <?php if ($phone): ?>
+                    <li>Phone: <a href="<?php echo esc_url('https://www.google.com/search?q='.rawurlencode($phone)); ?>" target="_blank" rel="noreferrer">Google "<?php echo $esc($phone); ?>"</a></li>
+                <?php endif; ?>
+                <?php if ($addr): ?>
+                    <li>Address: <a href="<?php echo esc_url('https://www.google.com/search?q='.rawurlencode($addr)); ?>" target="_blank" rel="noreferrer">Google "<?php echo $esc($addr); ?>"</a></li>
+                <?php endif; ?>
+                <?php if ($name): ?>
+                    <li>Name: <a href="<?php echo esc_url('https://www.google.com/search?q='.rawurlencode($name)); ?>" target="_blank" rel="noreferrer">Google "<?php echo $esc($name); ?>"</a></li>
+                <?php endif; ?>
+            </ul>
+
+            <p class="description" style="margin-top:8px;">
+                OrderSentinel stores results in its own table; saving into order meta is optional (Settings).
+            </p>
+        </div>
+        <?php
     }
 }

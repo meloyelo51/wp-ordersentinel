@@ -4,7 +4,7 @@ defined('ABSPATH') || exit;
 if ( ! class_exists('OS_REST_Monitor') ) :
 
 class OS_REST_Monitor {
-    const VERSION = '1.0.29';
+    const VERSION = '1.0.37';
 
     public static function init_hooks() {
         add_action('admin_menu', [__CLASS__, 'admin_menu']);
