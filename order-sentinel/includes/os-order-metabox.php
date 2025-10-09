@@ -80,7 +80,9 @@ if ( ! function_exists('ordersentinel_render_combined_metabox') ) {
                 <input type="hidden" name="order_id" value="<?php echo esc_attr($order_id); ?>" />
                 <input type="hidden" name="ip"       value="<?php echo esc_attr($ip); ?>" />
                 <?php wp_nonce_field( 'ordersentinel_report_ip' ); ?>
-                <button type="submit" class="button button-secondary">Report to AbuseIPDB</button>
+                <?php echo function_exists('ordersentinel_render_abuseipdb_button')
+    ? ordersentinel_render_abuseipdb_button( (int)$order_id, isset($ip)? $ip : (isset($client_ip)? $client_ip : ''), 'Report to AbuseIPDB' )
+    : ''; ?>
             </form>
 
             <hr />
