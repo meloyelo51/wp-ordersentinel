@@ -69,7 +69,7 @@ if ( ! function_exists('ordersentinel_handle_abuse_report') ) {
         wp_safe_redirect( add_query_arg('ordersentinel_abuse','ok', $back) );
         exit;
     }
-    add_action('admin_post_ordersentinel_report_ip', 'ordersentinel_handle_abuse_report');
+
 }
 
 /** Order-page diagnostic: append &os_diag=1 to the order edit URL */
@@ -104,38 +104,10 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
 
 // Hook: admin-post handler
 if ( ! has_action( 'admin_post_ordersentinel_report_ip', 'ordersentinel_handle_report_ip' ) ) {
-    add_action( 'admin_post_ordersentinel_report_ip', 'ordersentinel_handle_report_ip' );
+
 }
 
-// Hidden form to avoid nested forms on admin edit screens
-if ( ! function_exists( 'ordersentinel_render_abuseipdb_hidden_form' ) ) {
-function ordersentinel_render_abuseipdb_hidden_form() {
-    static $printed = false; if ( $printed ) return; $printed = true; ?>
-    <form id="os-report-ip-form" action="<?php echo esc_url( admin_url( 'admin-post.php?action=ordersentinel_report_ip' ) ); ?>" method="post" style="display:none"></form>
-<?php }
-add_action( 'admin_footer', 'ordersentinel_render_abuseipdb_hidden_form' );
-}
 
-// Button renderer
-if ( ! function_exists( 'ordersentinel_render_abuseipdb_button' ) ) {
-function ordersentinel_render_abuseipdb_button( $order_id, $ip, $label = 'Report to AbuseIPDB' ) {
-    if ( ! current_user_can( 'manage_woocommerce' ) && ! current_user_can( 'edit_shop_orders' ) ) { return ''; }
-    $nonce   = wp_create_nonce( 'ordersentinel_report_ip_nonce' );
-    $form_id = 'os-report-ip-form';
-    $action  = admin_url( 'admin-post.php?action=ordersentinel_report_ip' );
-    ob_start(); ?>
-    <button type="submit" class="button button-secondary"
-            form="<?php echo esc_attr( $form_id ); ?>"
-            formaction="<?php echo esc_url( $action ); ?>"
-            formmethod="post">
-        <?php echo esc_html( $label ); ?>
-    </button>
-    <input type="hidden" form="<?php echo esc_attr( $form_id ); ?>" name="order_id" value="<?php echo esc_attr( (int) $order_id ); ?>" />
-    <input type="hidden" form="<?php echo esc_attr( $form_id ); ?>" name="ip" value="<?php echo esc_attr( $ip ); ?>" />
-    <input type="hidden" form="<?php echo esc_attr( $form_id ); ?>" name="_wpnonce" value="<?php echo esc_attr( $nonce ); ?>" />
-    <?php
-    return trim( ob_get_clean() );
-}}
     
 // Handler
 if ( ! function_exists( 'ordersentinel_handle_report_ip' ) ) {
@@ -173,10 +145,3 @@ add_action( 'admin_notices', 'ordersentinel_maybe_show_report_notice' );
 
 
 
-// Back-compat alias used by templates/metabox
-if ( ! function_exists( 'os_render_abuseipdb_button' ) ) {
-function os_render_abuseipdb_button( $order_id, $ip, $label = 'Report to AbuseIPDB' ) {
-    return function_exists('ordersentinel_render_abuseipdb_button')
-        ? ordersentinel_render_abuseipdb_button( $order_id, $ip, $label )
-        : '';
-}}

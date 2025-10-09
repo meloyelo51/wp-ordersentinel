@@ -75,14 +75,12 @@ if ( ! function_exists('ordersentinel_render_combined_metabox') ) {
                 ), admin_url('admin.php') ) ); ?>">Lookup IP (Tools)</a>
             </p>
 
-            <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>" style="margin-top:6px">
+            <form method="get" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>" style="margin-top:6px">
                 <input type="hidden" name="action"   value="ordersentinel_report_ip" />
                 <input type="hidden" name="order_id" value="<?php echo esc_attr($order_id); ?>" />
                 <input type="hidden" name="ip"       value="<?php echo esc_attr($ip); ?>" />
                 <?php wp_nonce_field( 'ordersentinel_report_ip' ); ?>
-                <?php echo function_exists('ordersentinel_render_abuseipdb_button')
-    ? ordersentinel_render_abuseipdb_button( (int)$order_id, isset($ip)? $ip : (isset($client_ip)? $client_ip : ''), 'Report to AbuseIPDB' )
-    : ''; ?>
+                <button type="submit" class="button button-secondary">Report to AbuseIPDB</button>
             </form>
 
             <hr />

@@ -86,7 +86,7 @@ if ( ! function_exists('ordersentinel_handle_abuseipdb_report') ) {
         exit;
     }
 }
-add_action('admin_post_ordersentinel_report_ip', 'ordersentinel_handle_abuseipdb_report');
+// (disabled) canonical handler lives in order-sentinel.php
 
 /** Show success/error after redirect */
 add_action('admin_notices', function () {
