@@ -1,0 +1,1 @@
+- AbuseIPDB quick-report button now posts to canonical `admin-post.php?action=ordersentinel_report_ip` (GET anchor). Stable redirect back to order edit; nonce/caps verified.
