@@ -75,13 +75,13 @@ if ( ! function_exists('ordersentinel_render_combined_metabox') ) {
                 ), admin_url('admin.php') ) ); ?>">Lookup IP (Tools)</a>
             </p>
 
-            <form method="get" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>" style="margin-top:6px">
-                <input type="hidden" name="action"   value="ordersentinel_report_ip" />
-                <input type="hidden" name="order_id" value="<?php echo esc_attr($order_id); ?>" />
-                <input type="hidden" name="ip"       value="<?php echo esc_attr($ip); ?>" />
-                <?php wp_nonce_field( 'ordersentinel_report_ip' ); ?>
-                <button type="submit" class="button button-secondary">Report to AbuseIPDB</button>
-            </form>
+            <?php
+  $report_url = wp_nonce_url(
+      admin_url( 'admin-post.php?action=ordersentinel_report_ip&order_id=' . intval( $order_id ) ),
+      'ordersentinel_report_ip'
+  );
+?>
+<a class="button button-secondary" href="<?php echo esc_url( $report_url ); ?>">Report to AbuseIPDB</a>
 
             <hr />
             <p><strong>Quick OSINT links</strong></p>
