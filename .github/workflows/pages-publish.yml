@@ -44,29 +44,62 @@ jobs:
             --exclude 'muplugins' \
             order-sentinel/ public/files/order-sentinel/
 
-          # ---- Docs + tickets (optional if present in this repo)
-          [ -f projects/order-sentinel/docs/_manifest.json ]     && cp -f projects/order-sentinel/docs/_manifest.json     public/projects/order-sentinel/docs/ || true
-          [ -f projects/order-sentinel/docs/roadmap.md ]         && cp -f projects/order-sentinel/docs/roadmap.md         public/projects/order-sentinel/docs/ || true
-          [ -f projects/order-sentinel/tickets/_manifest.json ]  && cp -f projects/order-sentinel/tickets/_manifest.json  public/projects/order-sentinel/tickets/ || true
-          if [ -d projects/order-sentinel/tickets ]; then
-            if compgen -G "projects/order-sentinel/tickets/*.md" > /dev/null; then
-              cp -f projects/order-sentinel/tickets/*.md public/projects/order-sentinel/tickets/
-            fi
+          # ---- Publish the project repo's standalone roadmap too (doesn't overwrite memory roadmap)
+          if [ -f docs/ROADMAP.md ]; then
+            mkdir -p public/project
+            cp -f docs/ROADMAP.md public/project/ROADMAP.md
           fi
 
-          # ---- Combined tickets (single file)
+      - name: Pull tickets/docs from memory repo (read-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/meloyelo51/greg16676935420-repo/main/projects/order-sentinel"
+
+          mkdir -p public/projects/order-sentinel/docs public/projects/order-sentinel/tickets
+
+          curl -sfL "$base/docs/_manifest.json"    -o public/projects/order-sentinel/docs/_manifest.json    || true
+          curl -sfL "$base/docs/roadmap.md"        -o public/projects/order-sentinel/docs/roadmap.md        || true
+          curl -sfL "$base/tickets/_manifest.json" -o public/projects/order-sentinel/tickets/_manifest.json || true
+
+          # Fetch ticket files listed in the memory manifest (if present)
+          if [ -f public/projects/order-sentinel/tickets/_manifest.json ]; then
+            python3 - <<'PY'
+import json, os, urllib.request
+man = "public/projects/order-sentinel/tickets/_manifest.json"
+with open(man, "r", encoding="utf-8") as f:
+    data = json.load(f)
+tickets = data.get("tickets") or []
+base = "https://raw.githubusercontent.com/meloyelo51/greg16676935420-repo/main/projects/order-sentinel/tickets"
+os.makedirs("public/projects/order-sentinel/tickets", exist_ok=True)
+for name in tickets:
+    url = f"{base}/{name}"
+    out = f"public/projects/order-sentinel/tickets/{name}"
+    try:
+        urllib.request.urlretrieve(url, out)
+        print("[pull]", name)
+    except Exception as e:
+        print("[skip]", name, e)
+PY
+          fi
+
+          # Build combined tickets file even if empty (keeps downstream reads simple)
           OUT=public/projects/order-sentinel/all_tickets_export.md
           : > "$OUT"
-          if compgen -G "projects/order-sentinel/tickets/*.md" > /dev/null; then
+          if compgen -G "public/projects/order-sentinel/tickets/*.md" > /dev/null; then
             while IFS= read -r -d '' f; do
               printf "\n\n# ===== %s =====\n" "$(basename "$f")" >> "$OUT"
               cat "$f" >> "$OUT"
-            done < <(find projects/order-sentinel/tickets -maxdepth 1 -type f -name '*.md' -print0)
+            done < <(find public/projects/order-sentinel/tickets -maxdepth 1 -type f -name '*.md' -print0)
           else
-            echo "# (no tickets found in this repo)" >> "$OUT"
+            echo "# (no tickets found in memory repo manifest)" >> "$OUT"
           fi
 
-          # ---- Tarball of everything under public/files/
+      - name: Tarball of plugin files
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bundle only the code snapshot under public/files/
           tar -C public -czf public/bundle/ordersentinel-code.tar.gz files
 
       - name: Build index.json (files + bundle)
