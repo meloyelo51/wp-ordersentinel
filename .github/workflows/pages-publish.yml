@@ -18,118 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assemble public snapshot
+      - name: Build tiny site
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf public && mkdir -p public/files public/bundle
-          mkdir -p public/projects/order-sentinel/docs public/projects/order-sentinel/tickets
-
-          # Include plugin code (adjust excludes as needed)
-          rsync -a --delete \
-            --exclude '.git' \
-            --exclude '.github' \
-            --exclude '__pycache__' \
-            --exclude 'node_modules' \
-            --exclude 'dist' \
-            --exclude 'tests' \
-            --exclude 'old' \
-            --exclude 'tmp' \
-            --exclude 'temp' \
-            --exclude 'sandbox' \
-            --exclude 'examples' \
-            --exclude 'mu' \
-            --exclude 'mu-plugins' \
-            --exclude 'mu_plugins' \
-            --exclude 'muplugins' \
-            order-sentinel/ public/files/order-sentinel/
-
-          # Also publish this repo's standalone roadmap (separate path)
-          if [ -f docs/ROADMAP.md ]; then
-            mkdir -p public/project
-            cp -f docs/ROADMAP.md public/project/ROADMAP.md
-          fi
-
-      - name: Pull tickets/docs from memory repo (read-only)
-        shell: bash
-        run: |
-          set -euo pipefail
-          base="https://raw.githubusercontent.com/meloyelo51/greg16676935420-repo/main/projects/order-sentinel"
-
-          mkdir -p public/projects/order-sentinel/docs public/projects/order-sentinel/tickets
-
-          curl -sfL "$base/docs/_manifest.json"    -o public/projects/order-sentinel/docs/_manifest.json    || true
-          curl -sfL "$base/docs/roadmap.md"        -o public/projects/order-sentinel/docs/roadmap.md        || true
-          curl -sfL "$base/tickets/_manifest.json" -o public/projects/order-sentinel/tickets/_manifest.json || true
-
-          # Fetch ticket files listed in the memory manifest (if present)
-          if [ -f public/projects/order-sentinel/tickets/_manifest.json ]; then
-            python3 - <<'PY'
-import json, os, urllib.request
-man = "public/projects/order-sentinel/tickets/_manifest.json"
-with open(man, "r", encoding="utf-8") as f:
-    data = json.load(f)
-tickets = data.get("tickets") or []
-base = "https://raw.githubusercontent.com/meloyelo51/greg16676935420-repo/main/projects/order-sentinel/tickets"
-os.makedirs("public/projects/order-sentinel/tickets", exist_ok=True)
-for name in tickets:
-    url = f"{base}/{name}"
-    out = f"public/projects/order-sentinel/tickets/{name}"
-    try:
-        urllib.request.urlretrieve(url, out)
-        print("[pull]", name)
-    except Exception as e:
-        print("[skip]", name, e)
-PY
-          fi
-
-          # Combined tickets (always emit, even if empty)
-          OUT=public/projects/order-sentinel/all_tickets_export.md
-          : > "$OUT"
-          if compgen -G "public/projects/order-sentinel/tickets/*.md" > /dev/null; then
-            while IFS= read -r -d '' f; do
-              printf "\n\n# ===== %s =====\n" "$(basename "$f")" >> "$OUT"
-              cat "$f" >> "$OUT"
-            done < <(find public/projects/order-sentinel/tickets -maxdepth 1 -type f -name '*.md' -print0)
-          else
-            echo "# (no tickets found in memory repo manifest)" >> "$OUT"
-          fi
-
-      - name: Tarball of plugin files
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -C public -czf public/bundle/ordersentinel-code.tar.gz files
-
-      - name: Build index.json (files + bundle)
-        shell: bash
-        run: |
-          python3 - <<'PY'
-import hashlib, json, os
-root = "public"
-entries = []
-files_root = os.path.join(root, "files")
-if os.path.isdir(files_root):
-  for dirpath, _, filenames in os.walk(files_root):
-    for name in filenames:
-      p = os.path.join(dirpath, name)
-      rel = os.path.relpath(p, root).replace("\\", "/")
-      h = hashlib.sha256()
-      with open(p,"rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-          h.update(chunk)
-      entries.append({"path": rel, "size": os.path.getsize(p), "sha256": h.hexdigest(), "url": "/" + rel})
-b = os.path.join(root, "bundle", "ordersentinel-code.tar.gz")
-if os.path.exists(b):
-  h2 = hashlib.sha256()
-  with open(b,"rb") as f:
-    for ch in iter(lambda: f.read(65536), b""):
-      h2.update(ch)
-  entries.append({"path": "bundle/ordersentinel-code.tar.gz", "size": os.path.getsize(b), "sha256": h2.hexdigest(), "url": "/bundle/ordersentinel-code.tar.gz"})
-with open(os.path.join(root, "index.json"), "w", encoding="utf-8") as out:
-  json.dump({"generated": True, "files": entries}, out, indent=2)
-print(f"[index] wrote {len(entries)} entries")
-PY
+          rm -rf public && mkdir -p public
+          echo '{ "ok": true, "note": "minimal test" }' > public/index.json
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
@@ -141,7 +35,6 @@ PY
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
