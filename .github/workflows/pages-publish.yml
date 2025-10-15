@@ -18,11 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assemble public snapshot (code only)
+      - name: Assemble code snapshot
         shell: bash
         run: |
           set -euo pipefail
           rm -rf public && mkdir -p public/files public/bundle
+          mkdir -p public/projects/order-sentinel/docs public/projects/order-sentinel/tickets
           rsync -a --delete \
             --exclude '.git' --exclude '.github' --exclude '__pycache__' \
             --exclude 'node_modules' --exclude 'dist' --exclude 'tests' \
@@ -31,8 +32,45 @@ jobs:
             --exclude 'mu_plugins' --exclude 'muplugins' \
             order-sentinel/ public/files/order-sentinel/
           tar -C public -czf public/bundle/ordersentinel-code.tar.gz files
-          # minimal index.json just to keep going
-          printf '{\n  "generated": true,\n  "files": [\n    {\n      "path": "bundle/ordersentinel-code.tar.gz"\n    }\n  ]\n}\n' > public/index.json
+
+      - name: Pull tickets/docs from memory repo (read-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/meloyelo51/greg16676935420-repo/main/projects/order-sentinel"
+          mkdir -p public/projects/order-sentinel/docs public/projects/order-sentinel/tickets
+          curl -sfL "$base/docs/_manifest.json"    -o public/projects/order-sentinel/docs/_manifest.json    || true
+          curl -sfL "$base/docs/roadmap.md"        -o public/projects/order-sentinel/docs/roadmap.md        || true
+          curl -sfL "$base/tickets/_manifest.json" -o public/projects/order-sentinel/tickets/_manifest.json || true
+          if [ -f public/projects/order-sentinel/tickets/_manifest.json ]; then
+            python3 - <<'PY'
+import json, os, urllib.request
+man = "public/projects/order-sentinel/tickets/_manifest.json"
+with open(man, "r", encoding="utf-8") as f:
+    data = json.load(f)
+tickets = data.get("tickets") or []
+base = "https://raw.githubusercontent.com/meloyelo51/greg16676935420-repo/main/projects/order-sentinel/tickets"
+os.makedirs("public/projects/order-sentinel/tickets", exist_ok=True)
+for name in tickets:
+    url = f"{base}/{name}"
+    out = f"public/projects/order-sentinel/tickets/{name}"
+    try:
+        urllib.request.urlretrieve(url, out)
+        print("[pull]", name)
+    except Exception as e:
+        print("[skip]", name, e)
+PY
+          fi
+          OUT=public/projects/order-sentinel/all_tickets_export.md
+          : > "$OUT"
+          if compgen -G "public/projects/order-sentinel/tickets/*.md" > /dev/null; then
+            while IFS= read -r -d '' f; do
+              printf "\n\n# ===== %s =====\n" "$(basename "$f")" >> "$OUT"
+              cat "$f" >> "$OUT"
+            done < <(find public/projects/order-sentinel/tickets -maxdepth 1 -type f -name '*.md' -print0)
+          else
+            echo "# (no tickets found in memory repo manifest)" >> "$OUT"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
