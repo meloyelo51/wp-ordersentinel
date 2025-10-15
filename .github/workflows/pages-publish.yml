@@ -45,17 +45,16 @@ jobs:
             order-sentinel/ public/files/order-sentinel/
 
           # ---- Docs + tickets (optional if present in this repo)
-          [ -f projects/order-sentinel/docs/_manifest.json ] && cp -f projects/order-sentinel/docs/_manifest.json public/projects/order-sentinel/docs/ || true
-          [ -f projects/order-sentinel/docs/roadmap.md ]     && cp -f projects/order-sentinel/docs/roadmap.md     public/projects/order-sentinel/docs/ || true
-          [ -f projects/order-sentinel/tickets/_manifest.json ] && cp -f projects/order-sentinel/tickets/_manifest.json public/projects/order-sentinel/tickets/ || true
+          [ -f projects/order-sentinel/docs/_manifest.json ]     && cp -f projects/order-sentinel/docs/_manifest.json     public/projects/order-sentinel/docs/ || true
+          [ -f projects/order-sentinel/docs/roadmap.md ]         && cp -f projects/order-sentinel/docs/roadmap.md         public/projects/order-sentinel/docs/ || true
+          [ -f projects/order-sentinel/tickets/_manifest.json ]  && cp -f projects/order-sentinel/tickets/_manifest.json  public/projects/order-sentinel/tickets/ || true
           if [ -d projects/order-sentinel/tickets ]; then
-            # copy ticket files if any exist
             if compgen -G "projects/order-sentinel/tickets/*.md" > /dev/null; then
               cp -f projects/order-sentinel/tickets/*.md public/projects/order-sentinel/tickets/
             fi
           fi
 
-          # ---- Combined tickets (single file) only if tickets exist
+          # ---- Combined tickets (single file)
           OUT=public/projects/order-sentinel/all_tickets_export.md
           : > "$OUT"
           if compgen -G "projects/order-sentinel/tickets/*.md" > /dev/null; then
