@@ -18,12 +18,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build tiny site
+      - name: Assemble public snapshot (code only)
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf public && mkdir -p public
-          echo '{ "ok": true, "note": "minimal test" }' > public/index.json
+          rm -rf public && mkdir -p public/files public/bundle
+          rsync -a --delete \
+            --exclude '.git' --exclude '.github' --exclude '__pycache__' \
+            --exclude 'node_modules' --exclude 'dist' --exclude 'tests' \
+            --exclude 'old' --exclude 'tmp' --exclude 'temp' --exclude 'sandbox' \
+            --exclude 'examples' --exclude 'mu' --exclude 'mu-plugins' \
+            --exclude 'mu_plugins' --exclude 'muplugins' \
+            order-sentinel/ public/files/order-sentinel/
+          tar -C public -czf public/bundle/ordersentinel-code.tar.gz files
+          # minimal index.json just to keep going
+          printf '{\n  "generated": true,\n  "files": [\n    {\n      "path": "bundle/ordersentinel-code.tar.gz"\n    }\n  ]\n}\n' > public/index.json
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
