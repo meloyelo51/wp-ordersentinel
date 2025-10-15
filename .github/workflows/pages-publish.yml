@@ -2,10 +2,12 @@ name: Publish code snapshot to GitHub Pages
 on:
   push:
     branches: [ main ]
+
 permissions:
   contents: read
   pages: write
   id-token: write
+
 concurrency:
   group: "pages"
   cancel-in-progress: true
@@ -22,7 +24,7 @@ jobs:
           rm -rf public && mkdir -p public/files public/bundle
           mkdir -p public/projects/order-sentinel/docs public/projects/order-sentinel/tickets
 
-          # ---- Include the plugin code (adjust excludes if needed)
+          # Include plugin code (adjust excludes as needed)
           rsync -a --delete \
             --exclude '.git' \
             --exclude '.github' \
@@ -41,13 +43,13 @@ jobs:
             --exclude 'muplugins' \
             order-sentinel/ public/files/order-sentinel/
 
-          # ---- Docs + tickets (manifests + all MDs)
-          cp -f projects/order-sentinel/docs/_manifest.json         public/projects/order-sentinel/docs/ || true
-          cp -f projects/order-sentinel/docs/roadmap.md             public/projects/order-sentinel/docs/ || true
-          cp -f projects/order-sentinel/tickets/_manifest.json      public/projects/order-sentinel/tickets/ || true
-          cp -f projects/order-sentinel/tickets/*.md                public/projects/order-sentinel/tickets/ || true
+          # Docs + tickets
+          cp -f projects/order-sentinel/docs/_manifest.json    public/projects/order-sentinel/docs/ || true
+          cp -f projects/order-sentinel/docs/roadmap.md        public/projects/order-sentinel/docs/ || true
+          cp -f projects/order-sentinel/tickets/_manifest.json public/projects/order-sentinel/tickets/ || true
+          cp -f projects/order-sentinel/tickets/*.md           public/projects/order-sentinel/tickets/ || true
 
-          # ---- One big “all tickets” file for low-call reads
+          # Combined tickets (single file, low-request read)
           OUT=public/projects/order-sentinel/all_tickets_export.md
           : > "$OUT"
           for f in projects/order-sentinel/tickets/*.md; do
@@ -55,33 +57,45 @@ jobs:
             cat "$f" >> "$OUT"
           done
 
-          # ---- Bundle tarball of everything under public/files
+          # Tarball of everything under public/files/
           tar -C public -czf public/bundle/ordersentinel-code.tar.gz files
 
-          # ---- Build index.json (path, size, sha256, url) for files + bundle
+      - name: Build index.json (files + bundle)
+        run: |
           python3 - <<'PY'
-import hashlib, json, os
-root = "public"
-entries = []
-for dirpath, _, filenames in os.walk(os.path.join(root, "files")):
-    for name in filenames:
-        p = os.path.join(dirpath, name)
-        rel = os.path.relpath(p, root).replace("\\", "/")
-        h = hashlib.sha256()
-        with open(p,"rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""): h.update(chunk)
-        entries.append({"path": rel, "size": os.path.getsize(p), "sha256": h.hexdigest(), "url": "/"+rel})
-# add the bundle
-b = os.path.join(root, "bundle", "ordersentinel-code.tar.gz")
-if os.path.exists(b):
-    h2 = hashlib.sha256()
-    with open(b,"rb") as f:
-        for ch in iter(lambda: f.read(65536), b""): h2.update(ch)
-    entries.append({"path": "bundle/ordersentinel-code.tar.gz", "size": os.path.getsize(b), "sha256": h2.hexdigest(), "url": "/bundle/ordersentinel-code.tar.gz"})
-with open(os.path.join(root,"index.json"),"w",encoding="utf-8") as out:
-    json.dump({"generated": True, "files": entries}, out, indent=2)
-print(f"[index] wrote {len(entries)} entries")
-PY
+          import hashlib, json, os
+          root = "public"
+          entries = []
+          for dirpath, _, filenames in os.walk(os.path.join(root, "files")):
+              for name in filenames:
+                  p = os.path.join(dirpath, name)
+                  rel = os.path.relpath(p, root).replace("\\", "/")
+                  h = hashlib.sha256()
+                  with open(p,"rb") as f:
+                      for chunk in iter(lambda: f.read(65536), b""):
+                          h.update(chunk)
+                  entries.append({
+                      "path": rel,
+                      "size": os.path.getsize(p),
+                      "sha256": h.hexdigest(),
+                      "url": "/" + rel,
+                  })
+          b = os.path.join(root, "bundle", "ordersentinel-code.tar.gz")
+          if os.path.exists(b):
+              h2 = hashlib.sha256()
+              with open(b,"rb") as f:
+                  for ch in iter(lambda: f.read(65536), b""):
+                      h2.update(ch)
+              entries.append({
+                  "path": "bundle/ordersentinel-code.tar.gz",
+                  "size": os.path.getsize(b),
+                  "sha256": h2.hexdigest(),
+                  "url": "/bundle/ordersentinel-code.tar.gz",
+              })
+          with open(os.path.join(root, "index.json"), "w", encoding="utf-8") as out:
+              json.dump({"generated": True, "files": entries}, out, indent=2)
+          print(f"[index] wrote {len(entries)} entries")
+          PY
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
