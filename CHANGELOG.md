@@ -3,6 +3,19 @@
 ## [1.0.38] — 2025-10-10
 
 
+
+## [1.0.38] — 2025-10-10
+
+
+### Improved
+
+- AbuseIPDB reporter flow verified live; successful reports visible on AbuseIPDB.
+
+
+### Fixed
+
+- AbuseIPDB quick-report button now posts to canonical `admin-post.php?action=ordersentinel_report_ip` (GET anchor). Stable redirect back to order edit; nonce/caps verified.
+
 ## [1.0.38] — 2025-10-10
 
 
@@ -23,3 +36,4 @@
 
 All notable changes to this project will be documented in this file.
 
+[1.0.38]: https://github.com/meloyelo51/wp-ordersentinel/compare/v1.0.16...v1.0.38
