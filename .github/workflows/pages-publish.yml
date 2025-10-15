@@ -2,7 +2,7 @@ name: Publish code snapshot to GitHub Pages
 on:
   push:
     branches: [ main ]
-
+    tags: [ 'v*' ]
 permissions:
   contents: read
   pages: write
@@ -40,10 +40,12 @@ jobs:
             cp -f docs/ROADMAP.md public/project/ROADMAP.md
           fi
 
-      - name: Pull tickets/docs from memory repo (read-only)
+      - name: Pull tickets/docs from memory repo (via index + manifests)
         run: |
           python3 scripts/pull_memory_tickets.py \
-            --base https://raw.githubusercontent.com/meloyelo51/greg16676935420-repo/main/projects/order-sentinel \
+            --memory-base https://raw.githubusercontent.com/meloyelo51/greg16676935420-repo/main \
+            --project-name "OrderSentinel" \
+            --project-repo "https://github.com/meloyelo51/wp-ordersentinel" \
             --dest public/projects/order-sentinel
 
       - name: Build bundle & index
