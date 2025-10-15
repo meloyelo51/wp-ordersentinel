@@ -20,6 +20,39 @@ if files_root.is_dir():
                 "url": "/" + rel,
             })
 
+
+projects_root = root / "projects"
+if projects_root.is_dir():
+    for q in projects_root.rglob("*"):
+        if q.is_file():
+            rel = q.relative_to(root).as_posix()
+            h = hashlib.sha256()
+            with open(q, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            entries.append({
+                "path": rel,
+                "size": q.stat().st_size,
+                "sha256": h.hexdigest(),
+                "url": "/" + rel,
+            })
+
+project_root = root / "project"
+if project_root.is_dir():
+    for q in project_root.rglob("*"):
+        if q.is_file():
+            rel = q.relative_to(root).as_posix()
+            h = hashlib.sha256()
+            with open(q, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            entries.append({
+                "path": rel,
+                "size": q.stat().st_size,
+                "sha256": h.hexdigest(),
+                "url": "/" + rel,
+            })
+
 bundle = root / "bundle" / "ordersentinel-code.tar.gz"
 if bundle.exists():
     h = hashlib.sha256()
