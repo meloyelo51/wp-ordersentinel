@@ -1,0 +1,5 @@
+.ordersentinel-hp-wrap { margin:0; padding:0; }
+.ordersentinel-hp-wrap .ordersentinel-hp-label { position:absolute !important; left:-10000px !important; top:auto !important; width:1px !important; height:1px !important; overflow:hidden !important; }
+.ordersentinel-hp-wrap input[type="text"],
+.ordersentinel-hp-wrap input[type="email"],
+.ordersentinel-hp-wrap input[type="tel"] { position:absolute !important; left:-10000px !important; }
