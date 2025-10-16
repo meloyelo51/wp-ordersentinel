@@ -324,3 +324,4 @@ class OS_Honeypot {
     }
 }}
 add_action('plugins_loaded', ['OS_Honeypot','boot']);
+add_action('admin_bar_menu', ['OS_Honeypot','admin_bar_shortcut'], 100);
