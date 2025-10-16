@@ -10,12 +10,20 @@ defined('ABSPATH') || exit;
  */
 if ( ! class_exists( 'OS_Honeypot' ) ) {
 class OS_Honeypot {
+
+    public static function body_class( $classes ) {
+        $o = get_option( self::OPT_KEY, self::defaults() );
+        if ( ! empty( $o['css_hide'] ) ) { $classes[] = 'ordersentinel-hp-hide'; }
+        return $classes;
+    }
+
     const OPT_KEY   = 'ordersentinel_honeypot_options';
     const NONCE_KEY = 'ordersentinel_hp_nonce';
     const FIELD_PREFIX = 'os_hp_';
 
     public static function boot() {
         add_action('admin_menu', [__CLASS__, 'admin_menu'], 60);
+        add_filter('body_class', array('OS_Honeypot','body_class'));
         $self = new self();
         add_action('admin_menu', [$self,'admin_menu'], 60);
         add_action('admin_init', [$self,'register_settings']);
