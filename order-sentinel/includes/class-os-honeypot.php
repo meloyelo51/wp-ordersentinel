@@ -152,7 +152,7 @@ class OS_Honeypot {
         return $out;
     }
 
-    public function render_admin() {
+    public static function render_admin() {
         if ( ! current_user_can('manage_options') ) { wp_die('Not allowed'); }
         echo '<div class="wrap"><h1>'.esc_html__('OrderSentinel — Honeypot','order-sentinel').'</h1>';
         echo '<form method="post" action="options.php">';
@@ -356,6 +356,6 @@ class OS_Honeypot {
 
 }}
 add_action('plugins_loaded', ['OS_Honeypot','boot']);
-add_action('admin_menu', ['OS_Honeypot','admin_menu'], 60);
-add_action('init', ['OS_Honeypot','register_wc_nav']);
-add_action('admin_bar_menu', ['OS_Honeypot','admin_bar_shortcut'], 100);
+if ( ! has_action('admin_menu', ['OS_Honeypot','admin_menu']) ) { add_action('admin_menu', ['OS_Honeypot','admin_menu'], 60); }
+if ( ! has_action('init', ['OS_Honeypot','register_wc_nav']) ) { add_action('init', ['OS_Honeypot','register_wc_nav']); }
+if ( ! has_action('admin_bar_menu', ['OS_Honeypot','admin_bar_shortcut']) ) { add_action('admin_bar_menu', ['OS_Honeypot','admin_bar_shortcut'], 100); }
