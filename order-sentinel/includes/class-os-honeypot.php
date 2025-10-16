@@ -43,24 +43,45 @@ class OS_Honeypot {
     }
 
     public static function admin_menu() {
-        // Preferred: under WooCommerce
-        add_submenu_page(
-            'woocommerce',
-            __('OrderSentinel Honeypot','order-sentinel'),
-            __('Honeypot','order-sentinel'),
-            'manage_woocommerce',
-            'ordersentinel_honeypot',
-            [__CLASS__, 'render_admin']
-        );
-        // Fallback: under Tools
-        add_submenu_page(
-            'tools.php',
-            __('OrderSentinel Honeypot','order-sentinel'),
-            __('Honeypot (OrderSentinel)','order-sentinel'),
-            'manage_options',
-            'ordersentinel_honeypot',
-            [__CLASS__, 'render_admin']
-        );
+        // Add under WooCommerce once
+        $slug   = 'ordersentinel_honeypot';
+        $parent = 'woocommerce';
+        $exists = false;
+        global $submenu;
+        if ( isset($submenu[$parent]) ) {
+            foreach ( $submenu[$parent] as $m ) {
+                if ( isset($m[2]) && $m[2] === $slug ) { $exists = true; break; }
+            }
+        }
+        if ( ! $exists ) {
+            add_submenu_page(
+                $parent,
+                __('OrderSentinel Honeypot','order-sentinel'),
+                __('Honeypot','order-sentinel'),
+                'manage_woocommerce',
+                $slug,
+                [__CLASS__, 'render_admin']
+            );
+        }
+
+        // Fallback under Tools — also guard against duplicates
+        $parent = 'tools.php';
+        $exists = false;
+        if ( isset($submenu[$parent]) ) {
+            foreach ( $submenu[$parent] as $m ) {
+                if ( isset($m[2]) && $m[2] === $slug ) { $exists = true; break; }
+            }
+        }
+        if ( ! $exists ) {
+            add_submenu_page(
+                $parent,
+                __('OrderSentinel Honeypot','order-sentinel'),
+                __('Honeypot (OrderSentinel)','order-sentinel'),
+                'manage_options',
+                $slug,
+                [__CLASS__, 'render_admin']
+            );
+        }
     }
 
     public function register_settings() {
