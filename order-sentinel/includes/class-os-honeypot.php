@@ -157,7 +157,7 @@ class OS_Honeypot {
                 if ( ! $k ) continue;
                 $places = [];
                 if ( ! empty($f['places']) && is_array($f['places']) ) {
-                    foreach ($f['places'] as $p) { $places.append(sanitize_key($p)); }
+                    foreach ($f['places'] as $p) { $places.array_push(sanitize_key($p)); }
                 }
                 $fields[] = [
                     'key' => $k,
