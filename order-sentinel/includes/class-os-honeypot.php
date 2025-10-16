@@ -157,13 +157,13 @@ class OS_Honeypot {
                 if ( ! $k ) continue;
                 $places = [];
                 if ( ! empty($f['places']) && is_array($f['places']) ) {
-                    foreach ($f['places'] as $p) { $places.array_push(sanitize_key($p)); }
+                    foreach ($f['places'] as $p) { $places[] = sanitize_key($p); }
                 }
                 $fields[] = [
                     'key' => $k,
                     'label' => $l ?: ucfirst(str_replace('_',' ',$k)),
                     'places' => array_values(array_unique($places)),
-                    'css_hide' => !empty($f['css_hide']) ? 1 : 1, // default on
+                    'css_hide' => !empty($f['css_hide']) ? 1 : 0, // default on
                     'required_look' => !empty($f['required_look']) ? 1 : 0,
                 ];
             }
