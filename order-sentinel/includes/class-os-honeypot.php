@@ -42,15 +42,24 @@ class OS_Honeypot {
         return wp_parse_args($o, self::defaults());
     }
 
-    public function admin_menu() {
-        $parent = 'ordersentinel'; // parent slug already used by the plugin
+    public static function admin_menu() {
+        // Preferred: under WooCommerce
         add_submenu_page(
-            $parent,
+            'woocommerce',
             __('OrderSentinel Honeypot','order-sentinel'),
             __('Honeypot','order-sentinel'),
+            'manage_woocommerce',
+            'ordersentinel_honeypot',
+            [__CLASS__, 'render_admin']
+        );
+        // Fallback: under Tools
+        add_submenu_page(
+            'tools.php',
+            __('OrderSentinel Honeypot','order-sentinel'),
+            __('Honeypot (OrderSentinel)','order-sentinel'),
             'manage_options',
             'ordersentinel_honeypot',
-            [$this,'render_admin']
+            [__CLASS__, 'render_admin']
         );
     }
 
@@ -347,5 +356,6 @@ class OS_Honeypot {
 
 }}
 add_action('plugins_loaded', ['OS_Honeypot','boot']);
+add_action('admin_menu', ['OS_Honeypot','admin_menu'], 60);
 add_action('init', ['OS_Honeypot','register_wc_nav']);
 add_action('admin_bar_menu', ['OS_Honeypot','admin_bar_shortcut'], 100);
