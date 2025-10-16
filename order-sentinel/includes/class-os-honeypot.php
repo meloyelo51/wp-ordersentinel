@@ -322,6 +322,16 @@ class OS_Honeypot {
             'ts'    => time(),
         ]);
     }
+    public static function admin_bar_shortcut($wp_admin_bar) {
+        if ( ! is_admin() || ! current_user_can('manage_options') ) return;
+        $wp_admin_bar->add_node(array(
+            'id'    => 'ordersentinel_honeypot',
+            'title' => 'Honeypot',
+            'href'  => admin_url('admin.php?page=ordersentinel_honeypot'),
+            'parent'=> 'top-secondary'
+        ));
+    }
+
 }}
 add_action('plugins_loaded', ['OS_Honeypot','boot']);
 add_action('admin_bar_menu', ['OS_Honeypot','admin_bar_shortcut'], 100);
