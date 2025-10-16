@@ -15,6 +15,7 @@ class OS_Honeypot {
     const FIELD_PREFIX = 'os_hp_';
 
     public static function boot() {
+        add_action('admin_menu', [__CLASS__, 'admin_menu'], 60);
         $self = new self();
         add_action('admin_menu', [$self,'admin_menu'], 60);
         add_action('admin_init', [$self,'register_settings']);
@@ -330,6 +331,18 @@ class OS_Honeypot {
             'href'  => admin_url('admin.php?page=ordersentinel_honeypot'),
             'parent'=> 'top-secondary'
         ));
+    }
+
+    public static function register_wc_nav() {
+        if ( function_exists('wc_admin_register_page') ) {
+            wc_admin_register_page( array(
+                'id'         => 'ordersentinel-honeypot',
+                'title'      => __('Honeypot','order-sentinel'),
+                'parent'     => 'woocommerce',
+                'capability' => 'manage_woocommerce',
+                'path'       => 'admin.php?page=ordersentinel_honeypot',
+            ) );
+        }
     }
 
 }}
