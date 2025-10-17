@@ -18,3 +18,19 @@
   overflow: visible !important;
   display: block !important;
 }
+
+/* -- OrderSentinel honeypot: visible fallback (ensure mouse focus works) -- */
+.ordersentinel-hp-wrap .ordersentinel-hp-label,
+.ordersentinel-hp-wrap input[type="text"],
+.ordersentinel-hp-wrap input[type="email"],
+.ordersentinel-hp-wrap input[type="tel"]{
+  position: static !important;
+  left: auto !important;
+  clip: auto !important;
+  width: auto !important;
+  height: auto !important;
+  overflow: visible !important;
+  display: block !important;
+  pointer-events: auto !important;
+  opacity: 1 !important;
+}

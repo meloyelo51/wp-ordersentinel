@@ -383,8 +383,47 @@ class OS_Honeypot {
         }
     }
 
+
+    /**
+     * WooCommerce: block checkout if any honeypot field is filled.
+     * Runs on both classic and AJAX checkout paths.
+     */
+    public static function wc_after_checkout_validation( $data, $errors ) {
+        // settings gate
+        $opt = get_option( self::OPT_KEY, self::defaults() );
+        if ( empty( $opt['enabled'] ) ) { return; }
+
+        // scan posted values for any os_hp_* field with non-empty value
+        $tripped = false; $field = '';
+        foreach ( $_POST as $k => $v ) {
+            if ( is_string( $k ) && strpos( $k, 'os_hp_' ) === 0 ) {
+                if ( is_string( $v ) && trim( $v ) !== '' ) { $tripped = true; $field = $k; break; }
+                if ( is_array( $v ) && ! empty( array_filter( array_map( 'trim', $v ) ) ) ) { $tripped = true; $field = $k; break; }
+            }
+        }
+        if ( ! $tripped ) { return; }
+
+        // minimal "log only" for now (extend to DB/table later)
+        do_action( 'ordersentinel_hp_tripped', array(
+            'when'  => current_time( 'mysql' ),
+            'ip'    => isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field($_SERVER['REMOTE_ADDR']) : '',
+            'agent' => isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field($_SERVER['HTTP_USER_AGENT']) : '',
+            'field' => $field,
+        ) );
+
+        // block the checkout with a generic error
+        if ( is_object( $errors ) && method_exists( $errors, 'add' ) ) {
+            $errors->add( 'ordersentinel_hp', __( 'Something went wrong. Please contact support or try again.', 'order-sentinel' ) );
+        } else {
+            if ( function_exists( 'wc_add_notice' ) ) {
+                wc_add_notice( __( 'Something went wrong. Please contact support or try again.', 'order-sentinel' ), 'error' );
+            }
+        }
+    }
+
 }}
 add_action('plugins_loaded', ['OS_Honeypot','boot']);
 if ( ! has_action('admin_menu', ['OS_Honeypot','admin_menu']) ) { add_action('admin_menu', ['OS_Honeypot','admin_menu'], 60); }
 if ( ! has_action('init', ['OS_Honeypot','register_wc_nav']) ) { add_action('init', ['OS_Honeypot','register_wc_nav']); }
 if ( ! has_action('admin_bar_menu', ['OS_Honeypot','admin_bar_shortcut']) ) { add_action('admin_bar_menu', ['OS_Honeypot','admin_bar_shortcut'], 100); }
+add_action( 'woocommerce_after_checkout_validation', array( 'OS_Honeypot', 'wc_after_checkout_validation' ), 5, 2 );
