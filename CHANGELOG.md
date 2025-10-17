@@ -41,3 +41,8 @@
 [1.1.0]: https://github.com/meloyelo51/wp-ordersentinel/compare/v1.0.40...v1.1.0
 [1.0.39]: https://github.com/meloyelo51/wp-ordersentinel/compare/v1.0.38...v1.0.39
 [1.0.38]: https://github.com/meloyelo51/wp-ordersentinel/compare/v1.0.16...v1.0.38
+
+
+[1.1.0]: https://github.com/meloyelo51/wp-ordersentinel/compare/v1.0.40...v1.1.0
+[1.0.39]: https://github.com/meloyelo51/wp-ordersentinel/compare/v1.0.38...v1.0.39
+[1.0.38]: https://github.com/meloyelo51/wp-ordersentinel/compare/v1.0.16...v1.0.38
