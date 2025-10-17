@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OrderSentinel — Fraud/OSINT helper for WooCommerce orders
  * Description: Bulk/one-click OSINT on WooCommerce orders (RDAP, geoloc, AbuseIPDB). Includes dashboard, CSV export, optional non-PII AbuseIPDB reporting, and GitHub updates.
- * Version: 1.0.40
+ * Version: 1.1.0
  * Author: Matt's Basement Arcade
  * Text Domain: order-sentinel
  */
