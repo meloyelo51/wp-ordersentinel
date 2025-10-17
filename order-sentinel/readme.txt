@@ -4,7 +4,7 @@ Tags: woocommerce, fraud, osint, security, orders
 Requires at least: 5.8
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 1.0.38
+Stable tag: 1.0.40
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -45,6 +45,9 @@ define( 'ORDERSENTINEL_ABUSEIPDB_KEY', 'your-key-here' );
 or set the key in **WooCommerce → OrderSentinel → Settings**.
 
 == Changelog ==
+= 1.0.40 = (2025-10-17)
+* Update: See CHANGELOG.md for details.
+
 = 1.0.38 = (2025-10-10)
 * Fix: AbuseIPDB quick-report button uses canonical admin-post handler; stable redirect; nonce/caps verified.
 * Improve: Reporter flow verified live (reports visible on AbuseIPDB).
